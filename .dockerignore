@@ -7,6 +7,7 @@ __pycache__/
 .env.*
 .agent_memory.sqlite3
 *.sqlite3
+!.knowledge_base.sqlite3
 .greennode.json
 .agentbase/
 .agentbase-state.json

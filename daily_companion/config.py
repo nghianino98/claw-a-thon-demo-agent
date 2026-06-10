@@ -31,6 +31,9 @@ class AgentConfig:
     llm_model: str
     llm_timeout_seconds: float
     max_history_messages: int
+    knowledge_index_path: str
+    knowledge_max_chunks: int
+    knowledge_max_context_chars: int
     telegram_bot_token: str
     telegram_webhook_secret: str
     telegram_allowed_user_ids: frozenset[int]
@@ -52,6 +55,9 @@ def get_config() -> AgentConfig:
         llm_model=os.getenv("LLM_MODEL", ""),
         llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
         max_history_messages=int(os.getenv("MAX_HISTORY_MESSAGES", "18")),
+        knowledge_index_path=os.getenv("KNOWLEDGE_INDEX_PATH", ".knowledge_base.sqlite3"),
+        knowledge_max_chunks=int(os.getenv("KNOWLEDGE_MAX_CHUNKS", "5")),
+        knowledge_max_context_chars=int(os.getenv("KNOWLEDGE_MAX_CONTEXT_CHARS", "6000")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", ""),
         telegram_allowed_user_ids=parse_int_set(

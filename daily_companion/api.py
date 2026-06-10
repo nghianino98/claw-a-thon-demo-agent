@@ -39,6 +39,7 @@ class AgentHTTPHandler(BaseHTTPRequestHandler):
                     ),
                     "owner_count": len(self.agent.config.telegram_owner_user_ids),
                     "direct_api_auth_configured": bool(self.agent.config.agent_api_key),
+                    "knowledge": self.agent.knowledge.stats(),
                     "webhook_path": "/telegram/webhook/<secret>",
                 }
             )
@@ -52,6 +53,12 @@ class AgentHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {"status": "success", "memories": self.agent.list_memories(user_id)}
             )
+            return
+
+        if parsed.path == "/knowledge/status":
+            if not self._require_direct_api_authorization():
+                return
+            self._send_json({"status": "success", "knowledge": self.agent.knowledge.stats()})
             return
 
         self._send_json({"status": "error", "error": "Not found"}, HTTPStatus.NOT_FOUND)

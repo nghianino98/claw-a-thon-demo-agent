@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import AgentConfig, get_config
+from .knowledge import KnowledgeBase, format_hits_for_prompt
 from .llm import OpenAICompatibleClient
 from .memory import MemoryStore, extract_facts
 
@@ -12,6 +13,7 @@ class DailyCompanionAgent:
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or get_config()
         self.memory = MemoryStore(self.config.memory_db_path)
+        self.knowledge = KnowledgeBase(self.config.knowledge_index_path)
         self.llm = OpenAICompatibleClient(
             base_url=self.config.llm_base_url,
             api_key=self.config.llm_api_key,
@@ -33,12 +35,15 @@ class DailyCompanionAgent:
             }
 
         self.memory.add_message(user_id, session_id, "user", clean_message)
+        knowledge_hits = self.knowledge.search(
+            clean_message, limit=self.config.knowledge_max_chunks
+        )
         remembered = []
         for key, value in extract_facts(clean_message):
             self.memory.upsert_fact(user_id, key, value, clean_message)
             remembered.append({"key": key, "value": value})
 
-        prompt_messages = self._build_messages(user_id, session_id)
+        prompt_messages = self._build_messages(user_id, session_id, knowledge_hits)
 
         try:
             if self.config.has_llm:
@@ -59,16 +64,28 @@ class DailyCompanionAgent:
             "status": "success",
             "response": reply,
             "remembered": remembered,
+            "knowledge_sources": [
+                {"title": hit.title, "source_path": hit.source_path}
+                for hit in knowledge_hits
+            ],
             "mode": mode,
             "agent_name": self.config.agent_name,
             "timestamp": datetime.now().isoformat(),
         }
 
-    def _build_messages(self, user_id: str, session_id: str) -> list[dict[str, str]]:
+    def _build_messages(
+        self, user_id: str, session_id: str, knowledge_hits
+    ) -> list[dict[str, str]]:
         facts = self.memory.facts(user_id)
         facts_text = "\n".join(f"- {fact.key}: {fact.value}" for fact in facts)
         if not facts_text:
             facts_text = "- Chưa có memory nào về người dùng."
+
+        knowledge_text = format_hits_for_prompt(
+            knowledge_hits, self.config.knowledge_max_context_chars
+        )
+        if not knowledge_text:
+            knowledge_text = "- Không tìm thấy đoạn knowledge base liên quan cho câu hỏi này."
 
         now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%A, %Y-%m-%d %H:%M")
         system_prompt = f"""
@@ -88,6 +105,14 @@ Thời điểm hiện tại ở Việt Nam: {now}
 
 Memory về người dùng:
 {facts_text}
+
+Knowledge base context:
+{knowledge_text}
+
+Khi trả lời về Wealth Solution, FD, FI, MMF, Insurance hoặc các sản phẩm liên quan,
+ưu tiên dùng Knowledge base context ở trên. Nếu context không đủ, nói rõ là bạn
+chưa tìm thấy thông tin chắc chắn trong knowledge base. Khi dùng context, trích
+nguồn ngắn gọn theo tên tài liệu nếu phù hợp.
 """.strip()
 
         history = self.memory.recent_messages(

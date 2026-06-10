@@ -9,6 +9,7 @@ __pycache__/
 .env.*
 !.env.example
 .agent_memory.sqlite3
+.knowledge_base.sqlite3
 *.sqlite3
 
 .greennode.json

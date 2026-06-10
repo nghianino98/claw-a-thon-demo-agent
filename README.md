@@ -7,6 +7,7 @@ Một agent nhỏ để nói chuyện hằng ngày bằng tiếng Việt. Agent 
 - HTTP API tương thích kiểu runtime: `GET /health`, `POST /invocations`
 - CLI để chat trong terminal
 - Memory SQLite lưu hội thoại và vài sở thích/cách gọi của bạn
+- Knowledge base SQLite full-text search cho Wealth Solution hoặc tài liệu local
 - LLM provider dạng OpenAI-compatible, nhưng vẫn có fallback local khi chưa set API key
 - Telegram webhook adapter để chạy bot Telegram bằng cùng agent
 
@@ -71,6 +72,33 @@ Headers `X-GreenNode-AgentBase-User-Id` và `X-GreenNode-AgentBase-Session-Id` c
 `GET /memories?user_id=local-user` xem memory đã lưu.
 
 `POST /memories/clear` với body `{"user_id":"local-user"}` xóa memory của user đó.
+
+## Knowledge Base
+
+Build index từ folder tài liệu:
+
+```bash
+python3 main.py index-knowledge \
+  --source "/path/to/Wealth Solution/05. Knowledge" \
+  --index .knowledge_base.sqlite3
+```
+
+Sau đó set trong `.env`:
+
+```env
+KNOWLEDGE_INDEX_PATH=.knowledge_base.sqlite3
+KNOWLEDGE_MAX_CHUNKS=5
+KNOWLEDGE_MAX_CONTEXT_CHARS=6000
+```
+
+`.knowledge_base.sqlite3` bị ignore khỏi git nhưng được include vào Docker image để AgentBase runtime có thể tra cứu knowledge.
+
+Kiểm tra trạng thái:
+
+```bash
+curl -s https://your-agentbase-endpoint/knowledge/status \
+  -H "X-Agent-Api-Key: $AGENT_API_KEY"
+```
 
 ## Telegram
 

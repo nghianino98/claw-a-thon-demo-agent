@@ -5,6 +5,7 @@ from pathlib import Path
 from daily_companion.agent import DailyCompanionAgent
 from daily_companion.api import direct_api_authorized
 from daily_companion.config import AgentConfig, parse_int_set
+from daily_companion.knowledge import KnowledgeBase, build_index
 from daily_companion.memory import extract_facts
 from daily_companion.telegram import parse_callback, parse_message
 
@@ -23,6 +24,9 @@ class AgentTests(unittest.TestCase):
                 llm_model="",
                 llm_timeout_seconds=1,
                 max_history_messages=8,
+                knowledge_index_path=str(Path(tmpdir.name) / "knowledge.sqlite3"),
+                knowledge_max_chunks=3,
+                knowledge_max_context_chars=2000,
                 telegram_bot_token="",
                 telegram_webhook_secret="",
                 telegram_allowed_user_ids=frozenset(),
@@ -99,6 +103,23 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(direct_api_authorized("secret", None, "Bearer secret"))
         self.assertFalse(direct_api_authorized("secret", "wrong", None))
         self.assertFalse(direct_api_authorized("secret", None, None))
+
+    def test_build_and_search_knowledge_index(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        source = root / "kb"
+        source.mkdir()
+        (source / "FD.md").write_text(
+            "# Fixed Deposit\n\nFD supports term deposit journeys.", encoding="utf-8"
+        )
+        index = root / "knowledge.sqlite3"
+        result = build_index(str(source), str(index))
+        self.assertEqual(result["file_count"], 1)
+        kb = KnowledgeBase(str(index))
+        hits = kb.search("term deposit", limit=2)
+        self.assertTrue(hits)
+        self.assertIn("Fixed Deposit", hits[0].title)
 
 
 if __name__ == "__main__":
