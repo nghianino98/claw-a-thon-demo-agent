@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.idea
+tests
+.agentbase
+.env
+.greennode.json
+iam-creds.json
+
+.agentbase/
