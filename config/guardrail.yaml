@@ -1,0 +1,15 @@
+# Extra pre-LLM guardrail patterns. The app also ships with built-in defaults.
+# Keep patterns precise: this should block exploit/secret/system-prompt intent,
+# not ordinary product questions that happen to mention security or KYC.
+
+secret_request:
+  - "\\b(client[_\\s-]?secret|refresh[_\\s-]?token|session[_\\s-]?cookie)\\b"
+
+prompt_injection:
+  - "\\b(show|reveal|leak)\\s+(your\\s+)?(system|developer)\\s+prompt\\b"
+
+out_of_scope_file_access:
+  - "\\b/Users/[^\\s]+/.*\\.(env|sqlite3|pem|key)\\b"
+
+abuse_or_bypass:
+  - "\\b(cách|huong dan|hướng dẫn)\\b.*\\b(bypass|lách|vượt)\\b"
