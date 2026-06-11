@@ -14,6 +14,9 @@ from app.services.memory import MemoryService
 from app.services.registry import SkillRegistry, WorkflowRegistry
 
 
+from app.services.rate_limit import RateLimiter
+
+
 class TelegramReplyHandle:
     def __init__(self, client: TelegramClient, chat_id: int):
         self.client = client
@@ -38,6 +41,7 @@ class TelegramAdapter:
         skills: SkillRegistry,
         workflow_registry: WorkflowRegistry,
         audit: AuditService,
+        rate_limit: RateLimiter,
     ):
         self.client = client
         self.access = access
@@ -48,6 +52,7 @@ class TelegramAdapter:
         self.skills = skills
         self.workflow_registry = workflow_registry
         self.audit = audit
+        self.rate_limit = rate_limit
 
     async def handle_update(self, update: dict[str, Any]) -> None:
         if "callback_query" in update:
@@ -96,6 +101,10 @@ class TelegramAdapter:
     async def _dispatch_allowed(self, user: dict[str, Any], chat_id: int, text: str, owner: bool) -> None:
         user_id = int(user["id"])
         handle = TelegramReplyHandle(self.client, chat_id)
+        if not self.rate_limit.check(f"tg-{user_id}"):
+            self.audit.record(f"tg-{user_id}", "rate_limit_exceeded", "telegram", {"chat_id": chat_id})
+            await handle.send_text("Bạn đã vượt quá giới hạn tần suất yêu cầu. Vui lòng thử lại sau.")
+            return
         command, _, arg = text.partition(" ")
         command = command.split("@", 1)[0].lower()
         if command.startswith("/"):

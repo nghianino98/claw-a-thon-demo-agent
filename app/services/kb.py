@@ -17,7 +17,7 @@ from app.db import Database
 from app.services.audit import AuditService
 from app.services.registry import SkillRegistry, WorkflowRegistry
 from app.settings import Settings
-from app.utils import compact_text, safe_json, sha256_file, utc_now
+from app.utils import compact_text, log_event, safe_json, sha256_file, utc_now
 
 
 TEXT_EXTENSIONS = {

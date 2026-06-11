@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hmac
+import re
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -91,6 +92,40 @@ class ChunkedUploadStart(BaseModel):
     activate: bool = True
 
 
+class SkillCreate(BaseModel):
+    skill_id: str
+    name: str
+    description: str
+    triggers: str = ""
+    content_override: str | None = None
+    enabled: bool = True
+
+
+class SkillUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    triggers: str | None = None
+    content_override: str | None = None
+    enabled: bool | None = None
+
+
+class WorkflowCreate(BaseModel):
+    workflow_id: str
+    name: str
+    description: str = ""
+    content_override: str | None = None
+    schedule: str | None = None
+    enabled: bool = True
+
+
+class WorkflowUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    content_override: str | None = None
+    schedule: str | None = None
+    enabled: bool | None = None
+
+
 def auth_actor(request: Request, fallback: str = "system") -> str:
     return str(getattr(request.state, "auth_actor", fallback))
 
@@ -138,6 +173,7 @@ def build_services(settings: Settings) -> Services:
         skills,
         workflow_registry,
         audit,
+        rate_limit,
     )
     return Services(
         db,
@@ -324,12 +360,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/api/skills", dependencies=[Depends(require_admin_auth)])
     async def admin_skills(request: Request):
         services: Services = request.app.state.services
-        return {"status": "success", "skills": [skill.__dict__ for skill in services.skills.list_enabled()]}
+        return {"status": "success", "skills": [skill.__dict__ for skill in services.skills.list_all()]}
+
+    @app.post("/admin/api/skills", dependencies=[Depends(require_admin_operator)])
+    async def create_skill(request: Request, body: SkillCreate):
+        services: Services = request.app.state.services
+        if not re.match(r"^[a-z0-9_-]+$", body.skill_id):
+            raise HTTPException(status_code=400, detail="Invalid skill_id format")
+        actor = auth_actor(request, "admin-api")
+        now = utc_now()
+        with services.db.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM skills WHERE skill_id=?", (body.skill_id,)).fetchone()
+            if exists:
+                raise HTTPException(status_code=409, detail="Skill already exists")
+            conn.execute(
+                """
+                INSERT INTO skills(skill_id, name, description, triggers, source, kb_path, content_override, enabled, updated_at, updated_by)
+                VALUES (?,?,?,?, 'admin', NULL, ?, ?, ?, ?)
+                """,
+                (body.skill_id, body.name, body.description, body.triggers, body.content_override, int(body.enabled), now, actor),
+            )
+            conn.commit()
+        services.audit.record(actor, "skill_create", body.skill_id, {"name": body.name})
+        return {"status": "success", "skill_id": body.skill_id}
+
+    @app.patch("/admin/api/skills/{skill_id}", dependencies=[Depends(require_admin_operator)])
+    async def patch_skill(request: Request, skill_id: str, body: SkillUpdate):
+        services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
+        now = utc_now()
+        with services.db.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Skill not found")
+            
+            updates = []
+            params = []
+            for field, val in body.model_dump(exclude_unset=True).items():
+                updates.append(f"{field}=?")
+                if field == "enabled":
+                    params.append(int(val))
+                else:
+                    params.append(val)
+            if updates:
+                updates.append("updated_at=?")
+                updates.append("updated_by=?")
+                params.extend([now, actor])
+                params.append(skill_id)
+                query = f"UPDATE skills SET {', '.join(updates)} WHERE skill_id=?"
+                conn.execute(query, tuple(params))
+                conn.commit()
+        services.audit.record(actor, "skill_update", skill_id, body.model_dump(exclude_unset=True))
+        return {"status": "success", "skill_id": skill_id}
 
     @app.get("/admin/api/workflows", dependencies=[Depends(require_admin_auth)])
     async def admin_workflows(request: Request):
         services: Services = request.app.state.services
-        return {"status": "success", "workflows": [workflow.__dict__ for workflow in services.workflow_registry.list_enabled()]}
+        return {"status": "success", "workflows": [workflow.__dict__ for workflow in services.workflow_registry.list_all()]}
+
+    @app.post("/admin/api/workflows", dependencies=[Depends(require_admin_operator)])
+    async def create_workflow(request: Request, body: WorkflowCreate):
+        services: Services = request.app.state.services
+        if not re.match(r"^[a-z0-9_-]+$", body.workflow_id):
+            raise HTTPException(status_code=400, detail="Invalid workflow_id format")
+        actor = auth_actor(request, "admin-api")
+        now = utc_now()
+        with services.db.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM workflows WHERE workflow_id=?", (body.workflow_id,)).fetchone()
+            if exists:
+                raise HTTPException(status_code=409, detail="Workflow already exists")
+            conn.execute(
+                """
+                INSERT INTO workflows(workflow_id, name, description, source, kb_path, content_override, schedule, enabled, updated_at, updated_by)
+                VALUES (?,?,?, 'admin', NULL, ?, ?, ?, ?, ?)
+                """,
+                (body.workflow_id, body.name, body.description, body.content_override, body.schedule, int(body.enabled), now, actor),
+            )
+            conn.commit()
+        services.audit.record(actor, "workflow_create", body.workflow_id, {"name": body.name})
+        return {"status": "success", "workflow_id": body.workflow_id}
+
+    @app.patch("/admin/api/workflows/{workflow_id}", dependencies=[Depends(require_admin_operator)])
+    async def patch_workflow(request: Request, workflow_id: str, body: WorkflowUpdate):
+        services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
+        now = utc_now()
+        with services.db.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            
+            updates = []
+            params = []
+            for field, val in body.model_dump(exclude_unset=True).items():
+                updates.append(f"{field}=?")
+                if field == "enabled":
+                    params.append(int(val))
+                else:
+                    params.append(val)
+            if updates:
+                updates.append("updated_at=?")
+                updates.append("updated_by=?")
+                params.extend([now, actor])
+                params.append(workflow_id)
+                query = f"UPDATE workflows SET {', '.join(updates)} WHERE workflow_id=?"
+                conn.execute(query, tuple(params))
+                conn.commit()
+        services.audit.record(actor, "workflow_update", workflow_id, body.model_dump(exclude_unset=True))
+        return {"status": "success", "workflow_id": workflow_id}
 
     @app.get("/admin/api/kb", dependencies=[Depends(require_admin_auth)])
     async def admin_kb_versions(request: Request):
@@ -563,6 +701,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         base_version = meta_data.get("base_version")
         if base_version is None or active_version is None or int(base_version) != active_version:
             raise HTTPException(status_code=409, detail=f"Base version mismatch. Client base: {base_version}, active: {active_version}")
+
+        deleted = meta_data.get("deleted", [])
+        if active_version:
+            with services.db.connect() as conn:
+                row = conn.execute("SELECT COUNT(*) FROM kb_files WHERE kb_version=?", (active_version,)).fetchone()
+                active_file_count = row[0] if row else 0
+            if active_file_count > 0 and len(deleted) > 0.3 * active_file_count:
+                raise HTTPException(
+                    status_code=400,
+                    detail="quá nhiều file bị xóa — xác nhận bằng full upload"
+                )
 
         with services.db.connect() as conn:
             processing = conn.execute("SELECT id FROM kb_versions WHERE status='processing' LIMIT 1").fetchone()

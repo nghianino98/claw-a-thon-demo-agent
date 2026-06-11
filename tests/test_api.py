@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +54,168 @@ class ApiTests(unittest.TestCase):
                         self.assertIn("answer", payload["answers"][0])
                         forbidden = await client.post("/admin/api/backup", headers=admin_headers)
                         self.assertEqual(forbidden.status_code, 403)
+
+        asyncio.run(run())
+
+    def test_admin_skills_and_workflows(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = Settings(
+                    APP_ENV="development",
+                    STATE_DIR=str(Path(td) / "state"),
+                    AGENT_API_KEY="test-key",
+                    AGENT_ADMIN_TOKEN="admin-token",
+                    TELEGRAM_OWNER_USER_IDS="100",
+                    TELEGRAM_MODE="webhook",
+                )
+                app = create_app(settings)
+                transport = httpx.ASGITransport(app=app)
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                        admin_headers = {
+                            "Authorization": "Bearer admin-token",
+                            "X-Acting-User": "duy",
+                            "X-Acting-Role": "operator",
+                        }
+                        
+                        # List initially empty
+                        resp = await client.get("/admin/api/skills", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(len(resp.json()["skills"]), 0)
+                        
+                        # Create skill
+                        resp = await client.post("/admin/api/skills", headers=admin_headers, json={
+                            "skill_id": "test-skill",
+                            "name": "Test Skill",
+                            "description": "This is a test skill description",
+                            "triggers": "test trigger",
+                            "content_override": "override content",
+                            "enabled": True
+                        })
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(resp.json()["skill_id"], "test-skill")
+                        
+                        # Get skill (list all)
+                        resp = await client.get("/admin/api/skills", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(len(resp.json()["skills"]), 1)
+                        self.assertEqual(resp.json()["skills"][0]["skill_id"], "test-skill")
+                        
+                        # Patch skill
+                        resp = await client.patch("/admin/api/skills/test-skill", headers=admin_headers, json={
+                            "name": "Updated Test Skill",
+                            "enabled": False
+                        })
+                        self.assertEqual(resp.status_code, 200)
+                        
+                        # Get skill (list all should still return it even if disabled)
+                        resp = await client.get("/admin/api/skills", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(len(resp.json()["skills"]), 1)
+                        self.assertEqual(resp.json()["skills"][0]["name"], "Updated Test Skill")
+                        self.assertEqual(resp.json()["skills"][0]["enabled"], False)
+
+                        # Workflows creation & updating
+                        resp = await client.get("/admin/api/workflows", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(len(resp.json()["workflows"]), 0)
+                        
+                        resp = await client.post("/admin/api/workflows", headers=admin_headers, json={
+                            "workflow_id": "test-workflow",
+                            "name": "Test Workflow",
+                            "description": "Test workflow description",
+                            "content_override": "workflow steps override",
+                            "schedule": "*/5 * * * *",
+                            "enabled": True
+                        })
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(resp.json()["workflow_id"], "test-workflow")
+                        
+                        resp = await client.get("/admin/api/workflows", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(len(resp.json()["workflows"]), 1)
+                        self.assertEqual(resp.json()["workflows"][0]["workflow_id"], "test-workflow")
+                        
+                        resp = await client.patch("/admin/api/workflows/test-workflow", headers=admin_headers, json={
+                            "name": "Updated Test Workflow",
+                            "schedule": None
+                        })
+                        self.assertEqual(resp.status_code, 200)
+                        
+                        resp = await client.get("/admin/api/workflows", headers=admin_headers)
+                        self.assertEqual(resp.status_code, 200)
+                        self.assertEqual(resp.json()["workflows"][0]["name"], "Updated Test Workflow")
+                        self.assertIsNone(resp.json()["workflows"][0]["schedule"])
+
+        asyncio.run(run())
+
+    def test_kb_delta_deletion_threshold(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = Settings(
+                    APP_ENV="development",
+                    STATE_DIR=str(Path(td) / "state"),
+                    AGENT_API_KEY="test-key",
+                    AGENT_ADMIN_TOKEN="admin-token",
+                    SYNC_API_KEY="sync-key",
+                    TELEGRAM_OWNER_USER_IDS="100",
+                    TELEGRAM_MODE="webhook",
+                )
+                app = create_app(settings)
+                transport = httpx.ASGITransport(app=app)
+                async with app.router.lifespan_context(app):
+                    services = app.state.services
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                        # Setup fake active version with files
+                        with services.db.connect() as conn:
+                            # insert fake active version
+                            conn.execute(
+                                "INSERT INTO kb_versions(id, status, uploaded_by, original_filename, created_at, kind) VALUES (1, 'active', 'test', 'test.zip', '2026-06-11', 'full')"
+                            )
+                            # insert 10 fake files
+                            for i in range(10):
+                                conn.execute(
+                                    "INSERT INTO kb_files(kb_version, path, sha256, size, mtime) VALUES (1, ?, 'sha', 100, '2026-06-11')",
+                                    (f"file_{i}.md",)
+                                )
+                            conn.commit()
+                        
+                        # Verify we can active version 1
+                        self.assertEqual(services.kb.active_version(), 1)
+                        
+                        # Try to send delta sync with 4 deletions (4/10 = 40% > 30%)
+                        # This should be rejected with 400
+                        headers = {"X-Sync-Api-Key": "sync-key"}
+                        import io
+                        meta_data = {
+                            "base_version": 1,
+                            "deleted": ["file_0.md", "file_1.md", "file_2.md", "file_3.md"],
+                            "added_modified": []
+                        }
+                        # We need to send multipart/form-data
+                        files = {
+                            "archive": ("delta.zip", io.BytesIO(b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), "application/zip")
+                        }
+                        data = {"meta": json.dumps(meta_data)}
+                        resp = await client.post("/admin/api/kb/delta", headers=headers, data=data, files=files)
+                        self.assertEqual(resp.status_code, 400)
+                        self.assertIn("quá nhiều file bị xóa", resp.json()["error"])
+                        
+                        # Try to send delta sync with 2 deletions (2/10 = 20% <= 30%)
+                        # This should be accepted with 200 status (although the background task might fail/succeed, the HTTP status code is 200)
+                        meta_data_ok = {
+                            "base_version": 1,
+                            "deleted": ["file_0.md", "file_1.md"],
+                            "added_modified": []
+                        }
+                        data_ok = {"meta": json.dumps(meta_data_ok)}
+                        files = {
+                            "archive": ("delta.zip", io.BytesIO(b"PK\x05\x06\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), "application/zip")
+                        }
+                        # Mock the actual process_delta_task background task to avoid actual execution if it tries to unzip
+                        resp_ok = await client.post("/admin/api/kb/delta", headers=headers, data=data_ok, files=files)
+                        # The HTTP request is accepted (200 OK)
+                        self.assertEqual(resp_ok.status_code, 200)
 
         asyncio.run(run())
 

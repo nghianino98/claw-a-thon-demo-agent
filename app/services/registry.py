@@ -111,6 +111,11 @@ class SkillRegistry:
             rows = conn.execute("SELECT * FROM skills WHERE enabled=1 ORDER BY skill_id").fetchall()
         return [self._row(row) for row in rows]
 
+    def list_all(self) -> list[SkillRecord]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM skills ORDER BY skill_id").fetchall()
+        return [self._row(row) for row in rows]
+
     def get(self, skill_id: str) -> SkillRecord | None:
         with self.db.connect() as conn:
             row = conn.execute("SELECT * FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
@@ -200,6 +205,11 @@ class WorkflowRegistry:
     def list_enabled(self) -> list[WorkflowRecord]:
         with self.db.connect() as conn:
             rows = conn.execute("SELECT * FROM workflows WHERE enabled=1 ORDER BY workflow_id").fetchall()
+        return [self._row(row) for row in rows]
+
+    def list_all(self) -> list[WorkflowRecord]:
+        with self.db.connect() as conn:
+            rows = conn.execute("SELECT * FROM workflows ORDER BY workflow_id").fetchall()
         return [self._row(row) for row in rows]
 
     def get(self, workflow_id: str) -> WorkflowRecord | None:
