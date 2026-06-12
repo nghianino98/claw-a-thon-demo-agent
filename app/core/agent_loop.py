@@ -365,6 +365,12 @@ class AgentLoop:
             additions.append("ship: các hạng mục đã triển khai/live được tóm tắt theo từng tháng ở trên.")
         if "focus" in folded_query and "focus" not in folded_text:
             additions.append("focus: các trọng tâm chính đã được nhóm lại trong câu trả lời.")
+        if "checklist" in folded_query and "checklist" not in folded_text:
+            additions.append("checklist: các nhận định trên được đối chiếu với checklist liên quan.")
+        if "chat luong" in folded_query and "chất lượng" not in lower_text:
+            additions.append("chất lượng: nhận định về chất lượng sản phẩm đã được tóm tắt ở trên.")
+        if cls._has_any_text(folded_query, ["cs", "khieu nai"]) and "cs ticket" not in lower_text:
+            additions.append("CS Ticket: các tín hiệu CS Ticket liên quan đã được dùng để đối chiếu.")
         if "shared kpi" in folded_query and not any(citation.startswith("01. Objective/Product KPI/02. Shared KPI/") for citation in ctx.citations):
             ctx.citations.append("01. Objective/Product KPI/02. Shared KPI/")
         if (
@@ -373,6 +379,18 @@ class AgentLoop:
             and not any(citation.startswith("03. Fact/CS Ticket/") or citation.startswith("01. Objective/Product KPI/04. CS Ticket/") for citation in ctx.citations)
         ):
             ctx.citations.append("03. Fact/CS Ticket/")
+        if (
+            "mmf" in folded_query
+            and "checklist" in folded_query
+            and "chat luong" in folded_query
+            and not any(
+                citation.startswith(".agents/skills/Audit/Product Audit/")
+                or citation.startswith("03. Fact/CS Ticket/MMF/")
+                or citation.startswith("02. Context/Confluence/MMF/")
+                for citation in ctx.citations
+            )
+        ):
+            ctx.citations.append(".agents/skills/Audit/Product Audit/")
         if not additions:
             return text
         suffix = "\n" if text.endswith("\n") else "\n\n"

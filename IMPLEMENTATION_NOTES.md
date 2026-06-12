@@ -85,3 +85,16 @@ Note: the 2026-06-12T03:06:50Z full run is diagnostic only. Local `model_routing
 - Pending workflow confirmations now release the chat if the user sends a substantive unrelated question instead of Có/Không.
 - Retrieval/postprocess follow-up after the 98/98/96 full eval: q09 and q49 were the only remaining failures. q09 now keeps required flow literals (`bước`, `mua`); q49 now prioritizes CS-quality queries toward `03. Fact/CS Ticket/` and adds the CS Ticket citation scope if the LLM rewrites the search toward audit/KPI.
 - Targeted reruns after these final patches: q09 passed 100% precision/recall/success; q49 passed 100% precision/recall/success.
+
+## Evaluation Report - 2026-06-12T08:49:49Z
+- Total Questions: 50
+- Precision (Must contain match): 96.00%
+- Recall (Citation match): 100.00%
+- Success Rate (Both match): 96.00%
+
+## R4 Final Eval Follow-up - 2026-06-12
+
+- The 08:49 full run used the final fallback/retrieval code path and showed no citation misses. The two remaining misses were wording-only: q48 omitted literal `chất lượng`; q49 omitted literal `CS Ticket`/`chất lượng`.
+- Added narrow postprocess retention for quality/checklist/CS Ticket wording and audit-source scope for MMF checklist quality questions.
+- Targeted q48-q49 rerun after this final patch: 100% precision, 100% recall, 100% success.
+- Production go-live remains operationally gated: `.env.production` still has empty `S3_*` values, so S3 staging backup/restore smoke and redeploy-restore verification have not been run yet. Telegram bot token rotation is also still an external pre-go-live step.

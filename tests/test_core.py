@@ -125,6 +125,9 @@ class CoreTests(unittest.TestCase):
             ("Tháng 5/2026 mảng Investment có những highlight gì?", "Có nhiều điểm chính.", "May Report"),
             ("Ticket MMF-104 nói về gì, trạng thái ra sao?", "Không tìm thấy ticket này.", "trạng thái"),
             ("Key focus của team Wealth Solution trong AP26 là gì?", "Team tập trung vào growth.", "focus"),
+            ("Đánh giá nhanh chất lượng MMF hiện tại theo checklist?", "MMF có điểm mạnh và điểm yếu.", "chất lượng"),
+            ("Đánh giá nhanh chất lượng MMF hiện tại theo checklist?", "MMF có điểm mạnh và điểm yếu.", "checklist"),
+            ("Sản phẩm nào đang có nhiều vấn đề CS nhất gần đây và điều đó nói gì về chất lượng?", "CCQ có nhiều phản ánh.", "CS Ticket"),
         ]
         for question, answer, expected in cases:
             with self.subTest(question=question):
@@ -143,6 +146,10 @@ class CoreTests(unittest.TestCase):
         cs_ctx = AgentContext("u", "s", "Sản phẩm nào đang có nhiều vấn đề CS nhất gần đây và điều đó nói gì về chất lượng?", "qa")
         AgentLoop._postprocess_exact_lookup_answer("CCQ có nhiều vấn đề cần theo dõi.", cs_ctx)
         self.assertIn("03. Fact/CS Ticket/", cs_ctx.citations)
+
+        audit_ctx = AgentContext("u", "s", "Đánh giá nhanh chất lượng MMF hiện tại theo checklist", "qa")
+        AgentLoop._postprocess_exact_lookup_answer("MMF có điểm mạnh và điểm yếu.", audit_ctx)
+        self.assertIn(".agents/skills/Audit/Product Audit/", audit_ctx.citations)
 
     def test_production_validate_fails_fast(self):
         with self.assertRaises(ValueError):
