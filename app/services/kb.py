@@ -37,6 +37,10 @@ TEXT_EXTENSIONS = {
     ".sql",
     ".gs",
     ".sh",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".xlsm",
 }
 
 EXCLUDED_DIRS = {".git", ".next", ".obsidian", ".vscode", ".sixth", "venv", "node_modules", "__pycache__"}
@@ -205,6 +209,7 @@ class KBService:
             conn.execute("UPDATE kb_versions SET status='active', activated_at=? WHERE id=?", (now, version_id))
             conn.commit()
         self.reload_registries()
+        self._refresh_kb_map_cache()
         self._cleanup_old_versions()
         if self.audit:
             self.audit.record("system", "kb_activate", str(version_id), {})
@@ -213,6 +218,47 @@ class KBService:
         skills = self.skill_registry.reload_from_kb() if self.skill_registry else 0
         workflows = self.workflow_registry.reload_from_kb() if self.workflow_registry else 0
         return skills, workflows
+
+    def _refresh_kb_map_cache(self) -> None:
+        cache = self._build_kb_map_cache()
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO settings(key, value, updated_at, updated_by)
+                VALUES ('kb_map_cache', ?, ?, 'system')
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by
+                """,
+                (cache, utc_now()),
+            )
+            conn.commit()
+
+    def _build_kb_map_cache(self) -> str:
+        root = self.current_link
+        if not root.exists():
+            return "(không tìm thấy KB hiện tại)"
+        entries: list[str] = []
+        try:
+            resolved = root.resolve()
+            for dirname in ["05. Knowledge", "01. Objective", "04. Skill", "02. Context", "03. Fact"]:
+                base = resolved / dirname
+                if not base.exists():
+                    continue
+                for item in sorted(base.rglob("*")):
+                    if len(entries) >= 200:
+                        break
+                    if item.name.startswith("."):
+                        continue
+                    if "Zalopay Design System" in item.parts or "Tokens" in item.parts:
+                        continue
+                    if item.suffix.lower() in {".xlsx", ".pdf", ".docx", ".pptx", ".zip", ".json"}:
+                        continue
+                    rel = item.relative_to(resolved)
+                    entries.append(rel.as_posix() + ("/" if item.is_dir() else ""))
+            if len(entries) >= 200:
+                entries.append("[...] (còn nhiều file context/fact khác)")
+        except Exception:
+            return "(lỗi khi dựng bản đồ KB)"
+        return "\n".join(entries) if entries else "(KB hiện tại chưa có file phù hợp để lập bản đồ)"
 
     def versions(self) -> list[dict[str, Any]]:
         with self.db.connect() as conn:
@@ -245,7 +291,191 @@ class KBService:
         hits.sort(key=lambda hit: hit.score)
         return hits[:top_k]
 
-    def read(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+    async def search_async(self, query: str, product: str | None = None, area: str | None = None, top_k: int = 5) -> list[KnowledgeHit]:
+        version = self.active_version()
+        if not version:
+            return []
+
+        phrase_q, and_q, or_q = self._compile_fts_queries(query)
+        if not phrase_q:
+            return []
+
+        top_k = max(1, min(top_k, 10))
+        limit = 200
+
+
+        import asyncio
+        rows_phrase, rows_and, rows_or = await asyncio.gather(
+            asyncio.to_thread(self._search_sql, version, f'"{phrase_q}"', product, area, limit),
+            asyncio.to_thread(self._search_sql, version, and_q, product, area, limit),
+            asyncio.to_thread(self._search_sql, version, or_q, product, area, limit)
+        )
+
+        row_map = {}
+        rrf_scores = {}
+        k_rrf = 60
+
+        def process_list(rows):
+            for rank, row in enumerate(rows, start=1):
+                rid = row["rowid"]
+                row_map[rid] = row
+                rrf_scores[rid] = rrf_scores.get(rid, 0.0) + (1.0 / (k_rrf + rank))
+
+        process_list(rows_phrase)
+        process_list(rows_and)
+        process_list(rows_or)
+
+        hits = []
+        from datetime import datetime, UTC
+        for rid, rrf in rrf_scores.items():
+            row = row_map[rid]
+            days_old = 0
+            mtime_str = None
+            try:
+                mtime_str = row["mtime"]
+            except (KeyError, IndexError):
+                pass
+            if mtime_str:
+                try:
+                    file_dt = datetime.fromisoformat(mtime_str.replace("Z", "+00:00"))
+                    days_old = (datetime.now(UTC) - file_dt).days
+                except Exception:
+                    pass
+
+            penalty = 0.0
+            if days_old > 30:
+                penalty = min(3.0, (days_old - 30) / 30.0)
+
+            rrf_penalty = (penalty / 3.0) * 0.02
+            score = -rrf + rrf_penalty
+
+            haystack = f"{row['path']} {row['title']}".lower()
+            query_l = query.lower()
+            for prod, aliases in PRODUCT_ALIASES.items():
+                if any(alias in query_l for alias in aliases) and any(alias in haystack for alias in aliases):
+                    score -= 0.15
+            if row["area"] == "fact" and re.search(r"\b(lỗi|bug|issue|ticket|sự cố|error|fail)\b", query_l):
+                score -= 0.02
+            if row["area"] == "knowledge":
+                score -= 0.25
+
+            snippet = compact_text(str(row["content"]))[:400]
+            hit = KnowledgeHit(
+                path=row["path"],
+                title=row["title"],
+                snippet=snippet,
+                score=score,
+                lines=f"L{row['start_line']}-L{row['end_line']}",
+                product=row["product"],
+                area=row["area"],
+            )
+            hits.append(hit)
+
+        hits.sort(key=lambda x: x.score)
+
+        grouped_hits = []
+        path_counts = {}
+        for hit in hits:
+            path_counts[hit.path] = path_counts.get(hit.path, 0) + 1
+            if path_counts[hit.path] <= 2:
+                grouped_hits.append(hit)
+
+        return grouped_hits[:top_k]
+
+    @staticmethod
+    def _compile_fts_queries(query: str) -> tuple[str, str, str]:
+        stopwords = {
+            "và", "của", "là", "thì", "mà", "nhưng", "cũng", "các", "những", "một", "cho", "để", "với", "tại", "trong",
+            "ra", "vào", "lên", "xuống", "về", "đến", "theo", "qua", "bởi", "vì", "nên", "nếu", "tuy", "được", "bị", "này", "kia", "đó",
+            "the", "and", "of", "is", "in", "on", "at", "to", "for", "with", "by", "an", "a", "that", "this", "these", "those", "it", "its",
+            "đang", "có", "không", "ở", "từ", "trên", "dưới", "ngoài", "loại", "cho", "làm", "thế", "nào", "sao", "gì", "đâu", "ai", "mình",
+            "bạn", "này", "đó", "hoạt", "động", "cơ", "chế", "luồng", "quy", "trình", "bước", "lịch", "trình", "thời", "gian", "ngày",
+            "tháng", "năm", "giúp", "nhé", "nha", "đi", "hỏi", "vấn", "đề", "sự", "cố", "chi", "tiết", "cho", "biết", "hiện", "tại",
+            "bán", "mua", "gói", "sản", "phẩm", "tìm", "hiểu", "thông", "tin", "xử", "lý"
+        }
+        mappings = {
+            "nạp tiền": ["deposit"],
+            "nap tien": ["deposit"],
+            "rút tiền": ["withdraw", "redemption", "redeem"],
+            "rut tien": ["withdraw", "redemption", "redeem"],
+            "thanh toán": ["payment"],
+            "thanh toan": ["payment"],
+            "đối soát": ["reconciliation", "reconcile"],
+            "doi soat": ["reconciliation", "reconcile"],
+            "chuyển tiền": ["transfer"],
+            "chuyen tien": ["transfer"],
+            "tài khoản": ["account"],
+            "tai khoan": ["account"],
+            "số dư": ["balance"],
+            "so du": ["balance"],
+            "kỹ thuật": ["controller", "handler", "service", "internal"],
+            "ky thuat": ["controller", "handler", "service", "internal"],
+            "mã nguồn": ["controller", "handler", "service", "internal"],
+            "ma nguon": ["controller", "handler", "service", "internal"],
+            "code": ["controller", "handler", "service", "internal"],
+            "lỗi": ["error", "fail", "failed", "pending"],
+            "loi": ["error", "fail", "failed", "pending"],
+            "thất bại": ["fail", "failed"],
+            "that bai": ["fail", "failed"],
+        }
+        lower_query = query.lower()
+        tokens_with_pos = []
+        for m in re.finditer(r"[\wÀ-ỹ]+", lower_query, flags=re.UNICODE):
+            token = m.group(0)
+            pos = m.start()
+            tokens_with_pos.append((pos, token))
+
+        raw_words = [t for _, t in tokens_with_pos if t not in stopwords and len(t) >= 2]
+        if not raw_words:
+            raw_words = [t for _, t in tokens_with_pos if len(t) >= 2]
+
+        if not raw_words:
+            return "", "", ""
+
+        extra = []
+        sorted_keys = sorted(mappings.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            if key in lower_query:
+                extra.extend(mappings[key])
+
+        phrase_query = " ".join(raw_words)
+
+        and_clauses = []
+        used_keys = []
+        for key in sorted_keys:
+            if key in lower_query:
+                already_covered = False
+                for uk in used_keys:
+                    if key in uk or uk in key:
+                        already_covered = True
+                        break
+                if not already_covered:
+                    used_keys.append(key)
+                    words = key.split()
+                    eng_terms = mappings[key]
+                    clause = f"({' AND '.join(words)} OR {' OR '.join(eng_terms)})"
+                    and_clauses.append(clause)
+
+        for word in raw_words:
+            is_part_of_key = False
+            for uk in used_keys:
+                if word in uk.split():
+                    is_part_of_key = True
+                    break
+            if not is_part_of_key:
+                if word in mappings:
+                    eng_terms = mappings[word]
+                    and_clauses.append(f"({word} OR {' OR '.join(eng_terms)})")
+                else:
+                    and_clauses.append(word)
+
+        and_query = " AND ".join(and_clauses)
+        or_terms = list(set(raw_words + extra))
+        or_query = " OR ".join(or_terms)
+
+        return phrase_query, and_query, or_query
+
+    def read(self, path: str, start_line: int | None = None, end_line: int | None = None, max_chars: int | None = None) -> str:
         file_path = self._safe_current_path(path)
         if not file_path.exists():
             return f'{{"error":"not found: {path}"}}'
@@ -257,8 +487,9 @@ class KBService:
         end = min(total, end_line or total)
         selected = lines[start - 1 : end]
         text = "\n".join(f"{idx}: {line}" for idx, line in enumerate(selected, start=start))
-        if len(text) > self.settings.kb_read_max_chars:
-            text = text[: self.settings.kb_read_max_chars] + f"\n[đã cắt bớt, đọc tiếp với start_line={start + len(selected)}]"
+        limit = max_chars or self.settings.kb_read_max_chars
+        if len(text) > limit:
+            text = text[:limit] + f"\n[đã cắt bớt, đọc tiếp với start_line={start + len(selected)}]"
         return text
 
     def list_tree(self, path: str = ".", depth: int = 2) -> str:
@@ -408,7 +639,7 @@ class KBService:
                 title = self._title_for(rel, text)
                 product = self._classify_product(rel)
                 area = self._classify_area(rel)
-                for chunk, start_line, end_line in self._chunk_text(text):
+                for chunk, start_line, end_line in self._chunk_text(text, rel):
                     cur = conn.execute(
                         "INSERT INTO chunks_fts(path, title, product, area, content) VALUES (?,?,?,?,?)",
                         (rel, title, product, area, chunk),
@@ -449,12 +680,16 @@ class KBService:
         params.append(limit)
         sql = f"""
             SELECT chunks_fts.rowid, chunks_fts.path, chunks_fts.title, chunks_fts.product, chunks_fts.area,
-                   chunks_fts.content, bm25(chunks_fts) AS score, m.start_line, m.end_line
+                   chunks_fts.content, bm25(chunks_fts) AS score, m.start_line, m.end_line, m.mtime
             FROM chunks_fts
             CROSS JOIN chunks_meta m ON chunks_fts.rowid=m.rowid_fts
             CROSS JOIN kb_files kf ON kf.path=m.path AND kf.sha256=m.file_sha
             WHERE {' AND '.join(where)}
-            ORDER BY score
+            ORDER BY (CASE
+                WHEN chunks_fts.area = 'knowledge' THEN bm25(chunks_fts) - 5.0
+                WHEN chunks_fts.area = 'objective' THEN bm25(chunks_fts) - 3.0
+                ELSE bm25(chunks_fts)
+            END)
             LIMIT ?
         """
         with self.db.connect() as conn:
@@ -462,6 +697,16 @@ class KBService:
 
     def _row_to_hit(self, row: sqlite3.Row, query: str) -> KnowledgeHit:
         score = float(row["score"])
+        try:
+            mtime_str = row["mtime"]
+            if mtime_str:
+                from datetime import datetime, UTC
+                file_dt = datetime.fromisoformat(mtime_str.replace("Z", "+00:00"))
+                days_old = (datetime.now(UTC) - file_dt).days
+                if days_old > 30:
+                    score += min(3.0, (days_old - 30) / 30.0)
+        except (KeyError, ValueError, TypeError):
+            pass
         haystack = f"{row['path']} {row['title']}".lower()
         query_l = query.lower()
         for product, aliases in PRODUCT_ALIASES.items():
@@ -603,6 +848,10 @@ class KBService:
         base_version = int(meta["base_version"])
         client_host = meta.get("client_host", "unknown")
         deleted = meta.get("deleted", [])
+        with self.db.connect() as conn:
+            active_count = conn.execute("SELECT COUNT(*) FROM kb_files WHERE kb_version=?", (active_id,)).fetchone()[0]
+        if active_count > 10 and len(deleted) > 0.3 * active_count:
+            raise ValueError(f"Deletions exceed 30% safety limit: deleting {len(deleted)} of {active_count} files")
         added_modified = meta.get("added_modified", [])
         client_manifest_sha = meta.get("client_manifest_sha")
 
@@ -716,7 +965,7 @@ class KBService:
                     title = self._title_for(rel_path, text)
                     product = self._classify_product(rel_path)
                     area = self._classify_area(rel_path)
-                    for chunk, start_line, end_line in self._chunk_text(text):
+                    for chunk, start_line, end_line in self._chunk_text(text, rel_path):
                         cur = conn.execute(
                             "INSERT INTO chunks_fts(path, title, product, area, content) VALUES (?,?,?,?,?)",
                             (rel_path, title, product, area, chunk),
@@ -851,6 +1100,49 @@ class KBService:
 
     @staticmethod
     def _read_text(path: Path) -> str:
+        ext = path.suffix.lower()
+        if ext == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(path)
+                text_parts = []
+                for idx, page in enumerate(reader.pages, start=1):
+                    page_text = page.extract_text() or ""
+                    text_parts.append(f"--- Page {idx} ---\n{page_text}")
+                return "\n\n".join(text_parts)
+            except Exception as e:
+                return f"[Lỗi đọc PDF {path.name}: {e}]"
+        elif ext == ".docx":
+            try:
+                import docx
+                doc = docx.Document(path)
+                text_parts = []
+                for para in doc.paragraphs:
+                    if para.text.strip():
+                        text_parts.append(para.text)
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_text = [cell.text.strip() for cell in row.cells]
+                        text_parts.append(" | ".join(row_text))
+                return "\n".join(text_parts)
+            except Exception as e:
+                return f"[Lỗi đọc DOCX {path.name}: {e}]"
+        elif ext in (".xlsx", ".xlsm"):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+                text_parts = []
+                for sheet_name in wb.sheetnames:
+                    text_parts.append(f"--- Sheet: {sheet_name} ---")
+                    sheet = wb[sheet_name]
+                    for row in sheet.iter_rows(values_only=True):
+                        if any(row):
+                            row_str = " | ".join(str(val) if val is not None else "" for val in row)
+                            text_parts.append(row_str)
+                return "\n".join(text_parts)
+            except Exception as e:
+                return f"[Lỗi đọc XLSX {path.name}: {e}]"
+
         for encoding in ("utf-8", "utf-8-sig", "latin-1"):
             try:
                 return path.read_text(encoding=encoding)
@@ -916,50 +1208,95 @@ class KBService:
         return rel
 
     @staticmethod
-    def _chunk_text(text: str, max_chars: int = 1400, overlap: int = 180) -> list[tuple[str, int, int]]:
-        paragraphs: list[tuple[str, int, int]] = []
+    def _chunk_text(text: str, path: str = "", max_chars: int = 1400, overlap: int = 180) -> list[tuple[str, int, int]]:
+        lines = text.splitlines()
+        line_headings = []
+        h1, h2, h3 = None, None, None
+        for idx, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                h1 = stripped[2:].strip()
+                h2, h3 = None, None
+            elif stripped.startswith("## "):
+                h2 = stripped[3:].strip()
+                h3 = None
+            elif stripped.startswith("### "):
+                h3 = stripped[4:].strip()
+            line_headings.append((h1, h2, h3))
+
+        paragraphs: list[tuple[str, int, int, str]] = []
         buf: list[str] = []
         start = 1
-        for idx, line in enumerate(text.splitlines(), start=1):
+        for idx, line in enumerate(lines, start=1):
             if line.strip():
                 if not buf:
                     start = idx
                 buf.append(line)
             elif buf:
-                paragraphs.append(("\n".join(buf), start, idx - 1))
+                h1_val, h2_val, h3_val = line_headings[start - 1]
+                parts = []
+                if path:
+                    parts.append(os.path.basename(path))
+                if h1_val:
+                    parts.append(h1_val)
+                if h2_val:
+                    parts.append(h2_val)
+                if h3_val:
+                    parts.append(h3_val)
+                bc = " > ".join(parts)
+                paragraphs.append(("\n".join(buf), start, idx - 1, bc))
                 buf = []
         if buf:
-            paragraphs.append(("\n".join(buf), start, start + len(buf) - 1))
+            h1_val, h2_val, h3_val = line_headings[start - 1]
+            parts = []
+            if path:
+                parts.append(os.path.basename(path))
+            if h1_val:
+                parts.append(h1_val)
+            if h2_val:
+                parts.append(h2_val)
+            if h3_val:
+                parts.append(h3_val)
+            bc = " > ".join(parts)
+            paragraphs.append(("\n".join(buf), start, start + len(buf) - 1, bc))
 
         chunks: list[tuple[str, int, int]] = []
         current = ""
         current_start = 1
         current_end = 1
-        for para, start_line, end_line in paragraphs:
-            if len(para) > max_chars:
+        current_bc = ""
+
+        for para, start_line, end_line, bc in paragraphs:
+            prefix = f"[Breadcrumb: {bc}]\n\n" if bc else ""
+            if len(prefix + para) > max_chars:
                 if current:
-                    chunks.append((current.strip(), current_start, current_end))
+                    chunks.append((f"[Breadcrumb: {current_bc}]\n\n" + current if current_bc else current, current_start, current_end))
                     current = ""
                 pos = 0
                 while pos < len(para):
-                    part = para[pos : pos + max_chars]
-                    chunks.append((part.strip(), start_line, end_line))
-                    pos += max_chars - overlap
+                    part = para[pos : pos + max_chars - len(prefix)]
+                    chunks.append((prefix + part.strip() if bc else part.strip(), start_line, end_line))
+                    pos += max_chars - len(prefix) - overlap
                 continue
+
             if not current:
                 current = para
                 current_start = start_line
                 current_end = end_line
-            elif len(current) + len(para) + 2 <= max_chars:
+                current_bc = bc
+            elif len(current) + len(para) + 2 <= max_chars - len(prefix):
                 current += "\n\n" + para
                 current_end = end_line
             else:
-                chunks.append((current.strip(), current_start, current_end))
+                chunks.append((f"[Breadcrumb: {current_bc}]\n\n" + current if current_bc else current, current_start, current_end))
                 current = para
                 current_start = start_line
                 current_end = end_line
+                current_bc = bc
+
         if current:
-            chunks.append((current.strip(), current_start, current_end))
+            chunks.append((f"[Breadcrumb: {current_bc}]\n\n" + current if current_bc else current, current_start, current_end))
+
         return [chunk for chunk in chunks if chunk[0]]
 
     @staticmethod

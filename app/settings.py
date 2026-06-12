@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     workflow_max_concurrent: int = Field(2, alias="WORKFLOW_MAX_CONCURRENT")
     workflow_max_steps: int = Field(15, alias="WORKFLOW_MAX_STEPS")
     workflow_total_timeout_seconds: int = Field(1800, alias="WORKFLOW_TOTAL_TIMEOUT_SECONDS")
+    progress_first_seconds: int = Field(8, alias="PROGRESS_FIRST_SECONDS")
+    progress_update_seconds: int = Field(25, alias="PROGRESS_UPDATE_SECONDS")
 
     kb_upload_max_mb: int = Field(2000, alias="KB_UPLOAD_MAX_MB")
     kb_file_max_mb: int = Field(20, alias="KB_FILE_MAX_MB")

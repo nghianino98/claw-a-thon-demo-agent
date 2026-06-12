@@ -19,3 +19,36 @@
 - Staging deploy finding: runtime without S3 loses KB state across image updates/restarts, so production should not go live until `S3_*` is configured and redeploy restore is verified.
 - SQLite lock resilience: rate-limit, audit, memory side effects, and LLM call metrics now retry short locks and fail soft where safe, after staging exposed `database is locked` during/after large KB ingestion.
 - Deep mode foundation: `/deep <question>` and "tìm kỹ/check kỹ/nghiên cứu sâu" route to `mode=deep`, using `AGENT_DEEP_MAX_STEPS` and `AGENT_DEEP_TIMEOUT_SECONDS`.
+
+## 2026-06-12
+
+- Telegram runtime hardening: incoming Telegram messages now keep the persisted user message id through router/agent context, avoiding duplicate memory writes while keeping normal chat dispatch stable.
+- Workflow scheduler now starts runs through `WorkflowEngine.start(...)`, matching the live workflow path and owner notification behavior.
+- Dynamic Telegram commands now support persisted aliases, menu visibility, normalized fallback aliases, owner/API re-sync after registry mutations, direct `/alias <question>` skill execution, and friendly unknown-command suggestions.
+- Telegram long-running UX now refreshes typing status and sends/edits progress anchors for active agent/deep turns, with `/cancel` supporting both workflow run ids and the current chat session.
+- Deep/tool budgeting now flows through tool execution and KB reads; LLM call metrics record the effective task class so deep daily budget controls apply.
+- Model routing validation now rejects invalid native-tool routes, narrows code task detection, and only falls back on transient/provider failures.
+- KB registry lookups now use cached maps rebuilt on activation/sync, and active KB mutations trigger registry version bumps so runtime command/guardrail config can hot-reload.
+- Production hardening now triggers backups after active KB mutations and surfaces backup readiness warnings without rolling back successful activation on backup failure.
+- R3 follow-up: Router now detects natural-language workflow intent with lite LLM plus heuristic fallback, stores a pending confirmation in session state, and only starts the workflow after an explicit Có/Không confirmation.
+- Prompt layering now has a separate hardcoded L2b security guardrail block, Telegram `/help`/list commands mention `/new`, `/deep`, `/cancel [run_id]`, reply context, and command aliases.
+- Model routing validation now follows the design split: `agent` and `code` require profiled tool-calling models, while `deep` may be routed to a synthesis-only model.
+- `scripts/queo_sync.py` supports `--dry-run` to compute and print delta details without uploading.
+
+## Evaluation Report - 2026-06-11T15:57:03Z
+- Total Questions: 50
+- Precision (Must contain match): 70.00%
+- Recall (Citation match): 68.00%
+- Success Rate (Both match): 44.00%
+
+## Evaluation Report - 2026-06-11T16:24:08Z
+- Total Questions: 50
+- Precision (Must contain match): 60.00%
+- Recall (Citation match): 70.00%
+- Success Rate (Both match): 40.00%
+
+## Evaluation Report - 2026-06-11T18:43:03Z
+- Total Questions: 50
+- Precision (Must contain match): 88.00%
+- Recall (Citation match): 82.00%
+- Success Rate (Both match): 76.00%

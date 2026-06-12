@@ -38,6 +38,53 @@ def extract_triggers(description: str) -> str:
     return "|".join(sorted(triggers))
 
 
+def default_command_alias(entity_id: str) -> str:
+    raw = entity_id.rsplit("/", 1)[-1].lower().replace("-", "_")
+    raw = re.sub(r"[^a-z0-9_]+", "_", raw)
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    return raw[:32]
+
+
+BUILTIN_COMMAND_ALIASES = {
+    "start",
+    "help",
+    "whoami",
+    "skills",
+    "workflows",
+    "run",
+    "cancel",
+    "forget",
+    "new",
+    "deep",
+    "approve",
+    "revoke",
+    "users",
+    "status",
+    "kb_activate",
+    "runs",
+}
+
+
+def unique_command_alias(conn: Any, entity_type: str, entity_id: str, base: str) -> str:
+    existing: set[str] = set(BUILTIN_COMMAND_ALIASES)
+    for row in conn.execute("SELECT skill_id, command_alias FROM skills").fetchall():
+        if entity_type == "skill" and row["skill_id"] == entity_id:
+            continue
+        existing.add(default_command_alias(row["command_alias"] or row["skill_id"]))
+    for row in conn.execute("SELECT workflow_id, command_alias FROM workflows").fetchall():
+        if entity_type == "workflow" and row["workflow_id"] == entity_id:
+            continue
+        existing.add(default_command_alias(row["command_alias"] or row["workflow_id"]))
+    root = default_command_alias(base) or entity_type
+    candidate = root
+    suffix = 2
+    while candidate in existing:
+        suffix_text = f"_{suffix}"
+        candidate = (root[: 32 - len(suffix_text)] + suffix_text).strip("_")
+        suffix += 1
+    return candidate
+
+
 @dataclass
 class SkillRecord:
     skill_id: str
@@ -47,6 +94,8 @@ class SkillRecord:
     kb_path: str | None
     content_override: str | None
     enabled: bool
+    command_alias: str | None = None
+    show_in_menu: bool = True
 
 
 @dataclass
@@ -58,6 +107,8 @@ class WorkflowRecord:
     kb_path: str | None
     content_override: str | None
     enabled: bool
+    command_alias: str | None = None
+    show_in_menu: bool = True
 
 
 class SkillRegistry:
@@ -86,23 +137,24 @@ class SkillRegistry:
         now = utc_now()
         with self.db.connect() as conn:
             row = conn.execute("SELECT enabled, content_override, triggers FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
+            command_alias = unique_command_alias(conn, "skill", skill_id, skill_id)
             if row:
                 conn.execute(
                     """
                     UPDATE skills
                     SET name=?, description=?, triggers=CASE WHEN triggers='' THEN ? ELSE triggers END,
-                        source='kb', kb_path=?, updated_at=?
+                        source='kb', kb_path=?, command_alias=COALESCE(command_alias, ?), updated_at=?
                     WHERE skill_id=?
                     """,
-                    (name, description, triggers, kb_path, now, skill_id),
+                    (name, description, triggers, kb_path, command_alias, now, skill_id),
                 )
             else:
                 conn.execute(
                     """
-                    INSERT INTO skills(skill_id, name, description, triggers, source, kb_path, enabled, updated_at)
-                    VALUES (?,?,?,?, 'kb', ?, 1, ?)
+                    INSERT INTO skills(skill_id, name, description, triggers, source, kb_path, enabled, command_alias, updated_at)
+                    VALUES (?,?,?,?, 'kb', ?, 1, ?, ?)
                     """,
-                    (skill_id, name, description, triggers, kb_path, now),
+                    (skill_id, name, description, triggers, kb_path, command_alias, now),
                 )
             conn.commit()
 
@@ -152,6 +204,8 @@ class SkillRegistry:
             kb_path=row["kb_path"],
             content_override=row["content_override"],
             enabled=bool(row["enabled"]),
+            command_alias=row["command_alias"],
+            show_in_menu=bool(row["show_in_menu"]),
         )
 
 
@@ -183,22 +237,24 @@ class WorkflowRegistry:
         now = utc_now()
         with self.db.connect() as conn:
             row = conn.execute("SELECT workflow_id FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+            command_alias = unique_command_alias(conn, "workflow", workflow_id, workflow_id)
             if row:
                 conn.execute(
                     """
                     UPDATE workflows
-                    SET name=?, description=?, schedule=COALESCE(schedule, ?), source='kb', kb_path=?, updated_at=?
+                    SET name=?, description=?, schedule=COALESCE(schedule, ?), source='kb', kb_path=?,
+                        command_alias=COALESCE(command_alias, ?), updated_at=?
                     WHERE workflow_id=?
                     """,
-                    (name, description, schedule, kb_path, now, workflow_id),
+                    (name, description, schedule, kb_path, command_alias, now, workflow_id),
                 )
             else:
                 conn.execute(
                     """
-                    INSERT INTO workflows(workflow_id, name, description, source, kb_path, schedule, enabled, updated_at)
-                    VALUES (?,?,?, 'kb', ?, ?, 1, ?)
+                    INSERT INTO workflows(workflow_id, name, description, source, kb_path, schedule, enabled, command_alias, updated_at)
+                    VALUES (?,?,?, 'kb', ?, ?, 1, ?, ?)
                     """,
-                    (workflow_id, name, description, kb_path, schedule, now),
+                    (workflow_id, name, description, kb_path, schedule, command_alias, now),
                 )
             conn.commit()
 
@@ -240,6 +296,8 @@ class WorkflowRegistry:
             kb_path=row["kb_path"],
             content_override=row["content_override"],
             enabled=bool(row["enabled"]),
+            command_alias=row["command_alias"],
+            show_in_menu=bool(row["show_in_menu"]),
         )
 
 
@@ -267,4 +325,3 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
-

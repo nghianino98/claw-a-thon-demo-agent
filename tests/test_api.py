@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+import zipfile
 
 import httpx
 
@@ -54,6 +55,123 @@ class ApiTests(unittest.TestCase):
                         self.assertIn("answer", payload["answers"][0])
                         forbidden = await client.post("/admin/api/backup", headers=admin_headers)
                         self.assertEqual(forbidden.status_code, 403)
+                        backups = await client.get("/admin/api/backup", headers=admin_headers)
+                        self.assertEqual(backups.status_code, 200)
+                        self.assertFalse(backups.json()["enabled"])
+                        self.assertEqual(backups.json()["backups"], [])
+
+        asyncio.run(run())
+
+    def test_model_routing_validation(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = Settings(
+                    APP_ENV="development",
+                    STATE_DIR=str(Path(td) / "state"),
+                    AGENT_API_KEY="test-key",
+                    AGENT_ADMIN_TOKEN="admin-token",
+                    TELEGRAM_OWNER_USER_IDS="100",
+                    TELEGRAM_MODE="webhook",
+                )
+                app = create_app(settings)
+                transport = httpx.ASGITransport(app=app)
+                async with app.router.lifespan_context(app):
+                    services = app.state.services
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                        headers = {
+                            "Authorization": "Bearer admin-token",
+                            "X-Acting-User": "duy",
+                            "X-Acting-Role": "superadmin",
+                        }
+                        invalid = await client.patch(
+                            "/admin/api/settings",
+                            headers=headers,
+                            json={"values": {"model_routing": {"classes": {"agent": "unprofiled-model"}}}},
+                        )
+                        self.assertEqual(invalid.status_code, 409)
+
+                        deep_without_tool_profile = await client.patch(
+                            "/admin/api/settings",
+                            headers=headers,
+                            json={"values": {"model_routing": {"classes": {"deep": "unprofiled-model"}}}},
+                        )
+                        self.assertEqual(deep_without_tool_profile.status_code, 200)
+
+                        with services.db.connect() as conn:
+                            conn.execute(
+                                """
+                                INSERT INTO model_profiles(model, tool_native, tool_json, ctx_window)
+                                VALUES ('profiled-model', 1, 0, 128000)
+                                """
+                            )
+                            conn.commit()
+
+                        valid = await client.patch(
+                            "/admin/api/settings",
+                            headers=headers,
+                            json={"values": {"model_routing": {"classes": {"agent": "profiled-model"}}}},
+                        )
+                        self.assertEqual(valid.status_code, 200)
+
+        asyncio.run(run())
+
+    def test_kb_upload_backup_trigger_respects_activate_flag(self):
+        class FakeBackup:
+            enabled = True
+
+            def __init__(self):
+                self.calls = 0
+
+            def backup(self):
+                self.calls += 1
+                return f"backup-{self.calls}"
+
+        def kb_zip_bytes(label: str):
+            import io
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as zf:
+                zf.writestr("05. Knowledge/FD/FD.md", f"# FD\n\n{label}")
+            buffer.seek(0)
+            return buffer
+
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = Settings(
+                    APP_ENV="development",
+                    STATE_DIR=str(Path(td) / "state"),
+                    AGENT_API_KEY="test-key",
+                    AGENT_ADMIN_TOKEN="admin-token",
+                    TELEGRAM_OWNER_USER_IDS="100",
+                    TELEGRAM_MODE="webhook",
+                )
+                app = create_app(settings)
+                transport = httpx.ASGITransport(app=app)
+                async with app.router.lifespan_context(app):
+                    services = app.state.services
+                    fake_backup = FakeBackup()
+                    services.backup = fake_backup
+                    headers = {
+                        "Authorization": "Bearer admin-token",
+                        "X-Acting-User": "duy",
+                        "X-Acting-Role": "operator",
+                    }
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                        ready = await client.post(
+                            "/admin/api/kb/upload?activate=false",
+                            headers=headers,
+                            files={"file": ("kb-ready.zip", kb_zip_bytes("ready"), "application/zip")},
+                        )
+                        self.assertEqual(ready.status_code, 200)
+                        self.assertEqual(fake_backup.calls, 0)
+
+                        active = await client.post(
+                            "/admin/api/kb/upload?activate=true",
+                            headers=headers,
+                            files={"file": ("kb-active.zip", kb_zip_bytes("active"), "application/zip")},
+                        )
+                        self.assertEqual(active.status_code, 200)
+                        self.assertEqual(fake_backup.calls, 1)
 
         asyncio.run(run())
 
@@ -135,6 +253,11 @@ class ApiTests(unittest.TestCase):
                         self.assertEqual(resp.status_code, 200)
                         self.assertEqual(len(resp.json()["workflows"]), 1)
                         self.assertEqual(resp.json()["workflows"][0]["workflow_id"], "test-workflow")
+
+                        conflict = await client.patch("/admin/api/workflows/test-workflow", headers=admin_headers, json={
+                            "command_alias": "test_skill"
+                        })
+                        self.assertEqual(conflict.status_code, 409)
                         
                         resp = await client.patch("/admin/api/workflows/test-workflow", headers=admin_headers, json={
                             "name": "Updated Test Workflow",

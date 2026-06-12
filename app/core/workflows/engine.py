@@ -74,6 +74,8 @@ class WorkflowEngine:
             async with self.semaphore:
                 self._mark_running(run_id)
                 if reply_handle:
+                    if hasattr(reply_handle, "run_id"):
+                        reply_handle.run_id = run_id
                     await reply_handle.send_text(f"Bắt đầu workflow `{workflow_id}` (run #{run_id})")
                 spec = parse_workflow(workflow_id, self.workflows.load(workflow_id))
                 state: dict[str, Any] = {"params": {"raw": raw_params}, "outputs": []}
@@ -101,7 +103,7 @@ class WorkflowEngine:
                     all_citations.extend(reply.citations)
                     state["outputs"].append({"step": idx, "summary": reply.text[:2000], "citations": reply.citations})
                     self._append_log(run_id, {"step": idx, "status": "done", "summary": reply.text[:1000], "citations": reply.citations})
-                report = self._write_report(run_id, workflow_id, state, dedupe(all_citations))
+                report = await self._write_report(run_id, workflow_id, spec, state, dedupe(all_citations))
                 self._finish(run_id, "succeeded", [report])
                 if reply_handle:
                     await reply_handle.send_text(f"Workflow #{run_id} hoàn tất.")
@@ -155,15 +157,65 @@ class WorkflowEngine:
             row = conn.execute("SELECT status FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
         return bool(row and row["status"] == "cancelled")
 
-    def _write_report(self, run_id: int, workflow_id: str, state: dict[str, Any], citations: list[str]) -> str:
+    async def _write_report(self, run_id: int, workflow_id: str, spec: WorkflowSpec, state: dict[str, Any], citations: list[str]) -> str:
         directory = self.settings.artifacts_dir / str(run_id)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "report.md"
-        lines = [f"# Workflow {workflow_id} - run #{run_id}", "", "## Outputs"]
+
+        outputs_text = ""
         for item in state["outputs"]:
-            lines.extend(["", f"### Step {item['step']}", item["summary"]])
+            outputs_text += f"### Step {item['step']}\n{item['summary']}\n\n"
+
+        prompt = (
+            "Bạn là trợ lý ảo Quéo. Hãy tổng hợp các kết quả các bước của workflow sau thành một báo cáo hoàn chỉnh, sạch sẽ và thống nhất bằng tiếng Việt.\n"
+            "Hãy bám sát theo phần Hướng dẫn/Yêu cầu đầu ra (Output) của workflow.\n\n"
+            f"Thông tin Workflow:\nID: {workflow_id}\nMô tả: {spec.description}\nHướng dẫn hệ thống/Output:\n{spec.system}\n\n"
+            f"Kết quả các bước thực hiện:\n{outputs_text}\n"
+            "Hãy viết báo cáo tổng hợp cuối cùng dưới dạng Markdown hoàn chỉnh (không bọc trong tag code block, hãy viết trực tiếp văn bản markdown). "
+            "Tuyệt đối KHÔNG hiển thị liên kết markdown, đường dẫn tương đối hay tên file trong báo cáo gửi cho người dùng. Hãy trả về trực tiếp báo cáo tổng hợp sạch sẽ:"
+        )
+
+        deep_model = self.agent_loop.llm.resolve_model("deep")
+
+        try:
+            resp = await self.agent_loop.llm.chat(
+                deep_model,
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                timeout=600,
+                task_class="deep",
+            )
+            try:
+                with self.db.connect() as conn:
+                    conn.execute("PRAGMA busy_timeout=1000")
+                    conn.execute(
+                        """
+                        INSERT INTO llm_calls(model, purpose, prompt_tokens, completion_tokens, latency_ms, run_id, user_id, created_at)
+                        VALUES (?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            resp.model or deep_model,
+                            "workflow_synthesis",
+                            int(resp.usage.get("prompt_tokens") or 0),
+                            int(resp.usage.get("completion_tokens") or 0),
+                            resp.latency_ms,
+                            run_id,
+                            "system",
+                            utc_now(),
+                        ),
+                    )
+                    conn.commit()
+            except Exception:
+                pass
+            content = resp.content.strip()
+        except Exception as exc:
+            lines = [f"# Workflow {workflow_id} - run #{run_id}", "", "## Outputs"]
+            for item in state["outputs"]:
+                lines.extend(["", f"### Step {item['step']}", item["summary"]])
+            content = "\n".join(lines)
+
         if citations:
-            lines.extend(["", "## Sources"])
-            lines.extend(f"- {citation}" for citation in citations)
-        path.write_text("\n".join(lines), encoding="utf-8")
+            content += "\n\n## Sources\n" + "\n".join(f"- {citation}" for citation in citations)
+
+        path.write_text(content, encoding="utf-8")
         return f"artifacts/{run_id}/report.md"

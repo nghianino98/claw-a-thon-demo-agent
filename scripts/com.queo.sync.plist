@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.queo.sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/lap16947/Lab/queo-solution-agent/.venv/bin/python</string>
+        <string>/Users/lap16947/Lab/queo-solution-agent/scripts/queo_sync.py</string>
+        <string>--url</string>
+        <string>http://localhost:8000</string>
+        <string>--key</string>
+        <string>c513663c28fd51d537ff4ac3acc19240334633fc4a1460808a223bb4cd6de2e6</string>
+        <string>--dir</string>
+        <string>/Users/lap16947/Lab/queo-solution-agent/docs/queo-solution</string>
+        <string>--watch</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/lap16947/Lab/queo-solution-agent/data/sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/lap16947/Lab/queo-solution-agent/data/sync_error.log</string>
+</dict>
+</plist>

@@ -46,14 +46,38 @@ class AgentLoop:
             return await self._run_locked(ctx)
 
     async def _run_locked(self, ctx: AgentContext) -> AgentReply:
+        task_class = getattr(ctx, "task_class", "agent")
+        self._raise_if_cancelled(ctx)
+        loop_model = self.llm.resolve_model(task_class, user_id=ctx.user_id)
+
+        ctx_window = 32000
+        try:
+            with self.db.connect() as conn:
+                row = conn.execute("SELECT ctx_window FROM model_profiles WHERE model=?", (loop_model,)).fetchone()
+            if row:
+                ctx_window = int(row["ctx_window"])
+            elif "qwen" in loop_model.lower() or "gpt" in loop_model.lower() or "gemma" in loop_model.lower():
+                ctx_window = 128000
+        except Exception:
+            pass
+
+        ctx.context_budget_chars = min(self.settings.context_budget_chars_max, int(ctx_window * 0.6 * 4))
+        if ctx_window >= 32000:
+            ctx.tool_result_max_chars = 24000
+            ctx.kb_read_max_chars = 40000
+        else:
+            ctx.tool_result_max_chars = self.settings.tool_result_max_chars
+            ctx.kb_read_max_chars = self.settings.kb_read_max_chars
+
         raw_history = self.memory.recent_messages(ctx.user_id, ctx.session_id, self.settings.max_history_messages)
         original_message = ctx.message
         effective_message = self._effective_message(ctx.message, raw_history)
-        if ctx.mode != "workflow_step":
-            self.memory.add_message(ctx.user_id, ctx.session_id, "user", original_message)
+        external_message_persistence = bool(getattr(ctx, "user_msg_db_id", None))
+        if ctx.mode != "workflow_step" and not external_message_persistence:
+            self.memory.add_message(ctx.user_id, ctx.session_id, "user", original_message, tg_message_id=ctx.tg_message_id, reply_to_tg_message_id=ctx.reply_to_tg_message_id)
         if effective_message is None:
             reply = AgentReply(text="Bạn gửi lại câu hỏi hoặc chủ đề muốn Quéo xử lý nhé.", mode="static")
-            if ctx.mode != "workflow_step":
+            if ctx.mode != "workflow_step" and not external_message_persistence:
                 self.memory.add_message(ctx.user_id, ctx.session_id, "assistant", reply.text)
             return reply
         if effective_message != original_message:
@@ -63,17 +87,18 @@ class AgentLoop:
         started = time.perf_counter()
         mode = self.settings.toolcall_mode if self.settings.has_llm else "fallback"
         try:
+            self._raise_if_cancelled(ctx)
             if not self.settings.has_llm:
                 reply = await self._fallback(ctx)
             elif mode == "json":
-                reply = await self._run_json(ctx, history, started)
+                reply = await self._run_json(ctx, history, started, loop_model, task_class)
             else:
-                reply = await self._run_native(ctx, history, started)
+                reply = await self._run_native(ctx, history, started, loop_model, task_class)
         except Exception as exc:
             if self.settings.has_llm and mode == "native" and self._should_retry_json_after_native_error(exc):
                 self.audit.record(ctx.user_id, "agent_native_error", ctx.session_id, {"error": str(exc)})
                 try:
-                    reply = await self._run_json(ctx, history, started)
+                    reply = await self._run_json(ctx, history, started, loop_model, task_class)
                 except Exception as json_exc:
                     self.audit.record(
                         ctx.user_id,
@@ -86,14 +111,16 @@ class AgentLoop:
                 self.audit.record(ctx.user_id, "agent_error", ctx.session_id, {"error": str(exc)})
                 reply = await self._fallback(ctx, reason=str(exc))
 
-        if ctx.mode != "workflow_step":
+        if ctx.mode != "workflow_step" and not external_message_persistence:
             self.memory.add_message(ctx.user_id, ctx.session_id, "assistant", reply.text)
+        if ctx.mode != "workflow_step":
             if self.settings.has_llm and reply.mode != "fallback":
                 asyncio.create_task(self._extract_facts(ctx.user_id, original_message))
+                asyncio.create_task(self._trigger_rolling_summary(ctx.user_id, ctx.session_id))
         return reply
 
-    async def _run_retrieval_qa(self, ctx: AgentContext, history: list[dict[str, str]], started: float) -> AgentReply:
-        hits = self._search_hits(ctx.message, top_k=5)
+    async def _run_retrieval_qa(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
+        hits = await self._search_hits(ctx.message, top_k=5, ctx=ctx)
         if not hits:
             return self._reply("Mình chưa tìm thấy thông tin đủ liên quan trong KB cho câu hỏi này.", ctx, 0, "fallback")
         ctx.citations.extend(hit.path for hit in hits)
@@ -111,11 +138,13 @@ class AgentLoop:
         ]
         try:
             resp = await self.llm.chat(
-                self.settings.llm_model,
+                loop_model,
                 messages,
                 tools=None,
                 temperature=temperature_for_mode(ctx.mode),
                 timeout=min(18, self._llm_timeout_for_mode(ctx.mode, started)),
+                user_id=ctx.user_id,
+                task_class=task_class,
             )
             self._record_llm_call(resp, "retrieval_qa", ctx)
             text = resp.content.strip()
@@ -126,7 +155,7 @@ class AgentLoop:
             self.audit.record(ctx.user_id, "agent_retrieval_error", ctx.session_id, {"error": str(exc)})
             return await self._fallback(ctx, reason=str(exc), hits=hits)
 
-    async def _run_native(self, ctx: AgentContext, history: list[dict[str, str]], started: float) -> AgentReply:
+    async def _run_native(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.prompts.build(ctx, json_mode=False)}]
         messages.extend(history)
         messages.append({"role": "user", "content": ctx.message})
@@ -135,23 +164,31 @@ class AgentLoop:
         provenance_retry_sent = False
         max_steps = self._max_steps_for_mode(ctx.mode)
         for step in range(1, max_steps + 1):
+            self._raise_if_cancelled(ctx)
+            self._note_progress(ctx, step=step, max_steps=max_steps, phase="đang gọi model")
             self._check_total_timeout(started, ctx.mode)
-            messages = self._compact(messages)
+            messages = self._compact(messages, ctx)
             resp = await self.llm.chat(
-                self.settings.llm_model,
+                loop_model,
                 messages,
                 tools=tools,
                 temperature=temperature_for_mode(ctx.mode),
                 timeout=self._llm_timeout_for_mode(ctx.mode, started),
+                user_id=ctx.user_id,
+                task_class=task_class,
             )
-            self._record_llm_call(resp, "agent", ctx)
+            self._raise_if_cancelled(ctx)
+            self._record_llm_call(resp, task_class, ctx)
             if resp.tool_calls:
                 assistant_message = resp.raw_message or {"role": "assistant", "content": resp.content}
                 messages.append(assistant_message)
                 for call in resp.tool_calls[: self.settings.agent_max_parallel_tools]:
+                    self._raise_if_cancelled(ctx)
+                    self._note_progress(ctx, step=step, max_steps=max_steps, tool_name=call.name)
                     if call.name.startswith("kb_"):
                         used_kb_tool = True
                     result = await self.tools.execute(call.name, call.arguments, ctx)
+                    self._note_progress(ctx, step=step, max_steps=max_steps, sources=len(ctx.citations))
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": result})
                 continue
             text = resp.content.strip() or "Mình chưa có đủ thông tin để trả lời chắc chắn."
@@ -161,9 +198,9 @@ class AgentLoop:
                 messages.append({"role": "user", "content": self._provenance_retry_prompt(json_mode=False)})
                 continue
             return self._reply(text, ctx, step, "native")
-        return await self._summarize_after_budget(ctx, messages, "native")
+        return await self._summarize_after_budget(ctx, messages, "native", loop_model, task_class)
 
-    async def _run_json(self, ctx: AgentContext, history: list[dict[str, str]], started: float) -> AgentReply:
+    async def _run_json(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.prompts.build(ctx, json_mode=True) + "\n\nTOOL SCHEMAS:\n" + self.tools.json_mode_description()}]
         messages.extend(history)
         messages.append({"role": "user", "content": ctx.message})
@@ -172,16 +209,21 @@ class AgentLoop:
         provenance_retry_sent = False
         max_steps = self._max_steps_for_mode(ctx.mode)
         for step in range(1, max_steps + 1):
+            self._raise_if_cancelled(ctx)
+            self._note_progress(ctx, step=step, max_steps=max_steps, phase="đang gọi model")
             self._check_total_timeout(started, ctx.mode)
-            messages = self._compact(messages)
+            messages = self._compact(messages, ctx)
             resp = await self.llm.chat(
-                self.settings.llm_model,
+                loop_model,
                 messages,
                 tools=None,
                 temperature=temperature_for_mode(ctx.mode),
                 timeout=self._llm_timeout_for_mode(ctx.mode, started),
+                user_id=ctx.user_id,
+                task_class=task_class,
             )
-            self._record_llm_call(resp, "agent", ctx)
+            self._raise_if_cancelled(ctx)
+            self._record_llm_call(resp, task_class, ctx)
             action = parse_json_action(resp.content)
             if not action:
                 parse_failures += 1
@@ -198,16 +240,30 @@ class AgentLoop:
                     messages.append({"role": "user", "content": self._provenance_retry_prompt(json_mode=True)})
                     continue
                 return self._reply(answer, ctx, step, "json")
-            name = str(action.get("action") or "")
-            args = action.get("args") if isinstance(action.get("args"), dict) else {}
-            if name.startswith("kb_"):
-                used_kb_tool = True
-            result = await self.tools.execute(name, args, ctx)
-            messages.append({"role": "assistant", "content": resp.content})
-            messages.append({"role": "user", "content": f"Kết quả tool {name}:\n{result}"})
-        return await self._summarize_after_budget(ctx, messages, "json")
+            elif action.get("action") == "call" or (action.get("action") and (action.get("action") in self.tools._tools or str(action.get("action")).startswith("kb_"))):
+                if action.get("action") == "call":
+                    name = str(action.get("name") or "")
+                    args = action.get("args") or {}
+                else:
+                    name = str(action.get("action") or "")
+                    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+                if name.startswith("kb_"):
+                    used_kb_tool = True
+                self._raise_if_cancelled(ctx)
+                self._note_progress(ctx, step=step, max_steps=max_steps, tool_name=name)
+                result = await self.tools.execute(name, args, ctx)
+                self._note_progress(ctx, step=step, max_steps=max_steps, sources=len(ctx.citations))
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": f"TOOL RESULT for {name}: {result}"})
+                continue
+            else:
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": "Không có action final hoặc call/tool name hợp lệ trong phản hồi JSON."})
+                continue
+        return await self._summarize_after_budget(ctx, messages, "json", loop_model, task_class)
 
-    async def _summarize_after_budget(self, ctx: AgentContext, messages: list[dict[str, Any]], mode: str) -> AgentReply:
+    async def _summarize_after_budget(self, ctx: AgentContext, messages: list[dict[str, Any]], mode: str, loop_model: str, task_class: str) -> AgentReply:
+        messages = self._compact(messages, ctx)
         messages.append(
             {
                 "role": "user",
@@ -219,7 +275,7 @@ class AgentLoop:
         )
         try:
             resp = await self.llm.chat(self.settings.llm_model, messages, tools=None, temperature=0.2, timeout=self._llm_timeout_for_mode(ctx.mode, None))
-            self._record_llm_call(resp, "agent", ctx)
+            self._record_llm_call(resp, task_class, ctx)
             text = resp.content.strip()
         except Exception:
             text = "Mình đã hết ngân sách xử lý và chưa thể tổng hợp chắc chắn."
@@ -229,7 +285,7 @@ class AgentLoop:
         if hits is None:
             hits = []
             if ctx.mode in {"qa", "deep", "workflow_step"}:
-                hits = self._search_hits(ctx.message, top_k=5)
+                hits = await self._search_hits(ctx.message, top_k=5, ctx=ctx)
         if hits:
             ctx.citations.extend(hit.path for hit in hits)
             text = self._fallback_text(ctx.message, hits)
@@ -262,7 +318,7 @@ class AgentLoop:
         return trimmed
 
     def _llm_timeout_for_mode(self, mode: str, started: float | None = None) -> int:
-        ceiling = 60 if mode == "deep" else 45 if mode == "workflow_step" else 25
+        ceiling = 90 if mode == "deep" else 60 if mode == "workflow_step" else 55
         if started is not None:
             remaining = int(self._total_timeout_for_mode(mode) - (time.perf_counter() - started) - 1)
             ceiling = min(ceiling, remaining)
@@ -271,7 +327,7 @@ class AgentLoop:
     def _total_timeout_for_mode(self, mode: str) -> int:
         if mode == "deep":
             return max(30, self.settings.agent_deep_timeout_seconds)
-        ceiling = 300 if mode == "workflow_step" else 35
+        ceiling = 300 if mode == "workflow_step" else 85
         return max(10, min(ceiling, self.settings.agent_total_timeout_seconds))
 
     def _max_steps_for_mode(self, mode: str) -> int:
@@ -279,11 +335,40 @@ class AgentLoop:
             return max(self.settings.agent_max_steps, self.settings.agent_deep_max_steps)
         return self.settings.agent_max_steps
 
-    def _search_hits(self, query: str, top_k: int = 5) -> list[Any]:
+    async def _search_hits(self, query: str, top_k: int = 5, ctx: AgentContext | None = None) -> list[Any]:
         try:
-            return self.tools.kb.search(query, top_k=top_k)
+            search_ctx = ctx or AgentContext("", "", query, "qa")
+            expanded = await self.expand_query_with_lite(query, search_ctx)
+            search_query = f"{query} {expanded[:300]}" if expanded else query
+            return await self.tools.kb.search_async(search_query, top_k=top_k)
         except Exception:
             return []
+
+    async def expand_query_with_lite(self, query: str, ctx: AgentContext) -> str:
+        if not self.settings.llm_model_lite:
+            return ""
+        prompt = (
+            "Mở rộng câu query sau thành 3-8 từ khóa tìm kiếm KB, gồm cả biến thể tiếng Việt/English nếu hữu ích. "
+            "Chỉ trả về một dòng từ khóa, không giải thích.\n\n"
+            f"Query: {query}"
+        )
+        try:
+            resp = await self.llm.chat(
+                self.settings.lite_model,
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=120,
+                timeout=min(10, self.settings.llm_timeout_seconds),
+                user_id=ctx.user_id,
+                task_class="lite",
+            )
+            self._record_llm_call(resp, "query_expansion", ctx)
+            text = re.sub(r"[\n\r]+", " ", resp.content)
+            text = re.sub(r"[^0-9A-Za-zÀ-ỹ_ .,/:-]+", " ", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return text[:300]
+        except Exception:
+            return ""
 
     def _retrieval_context(self, hits: list[Any]) -> str:
         blocks: list[str] = []
@@ -478,7 +563,7 @@ class AgentLoop:
             return
         prompt = (
             "Trích xuất thông tin cá nhân (fact bền) của người dùng từ tin nhắn sau.\n"
-            "Chúng ta cần tìm các thông tin như: tên (name), vai trò/vị trí công việc (role - ví dụ: Product, Developer, QE, Business, Ops, FA, CEO, CFO), và bộ phận/phòng ban (department - ví dụ: Wealth, Stock, Operations, v.v.).\n"
+            "Chúng ta cần tìm các thông tin như: tên (name), vai trò/vị trí công việc (key: role, giá trị chuẩn hóa thuộc enum: CEO, CFO, Business, Marketing, FA, OP, Product, Developer, QE, ...), và bộ phận/phòng ban (key: department - ví dụ: Wealth, Stock, Operations, v.v.).\n"
             "Chỉ trả về duy nhất một JSON array dạng: "
             '[{"key": "name|preferred_name|role|department|likes|dislikes|note", "value": "..."}]\n'
             "Nếu không trích xuất được thông tin nào mới hoặc tin nhắn không chứa thông tin cá nhân, trả về [].\n\n"
@@ -525,7 +610,7 @@ class AgentLoop:
                     VALUES (?,?,?,?,?,?,?,?)
                     """,
                     (
-                        self.settings.llm_model,
+                        resp.model or self.settings.llm_model,
                         purpose,
                         int(resp.usage.get("prompt_tokens") or 0),
                         int(resp.usage.get("completion_tokens") or 0),
@@ -544,13 +629,89 @@ class AgentLoop:
                 raise
             self.audit.record(ctx.user_id, "llm_call_metric_drop", ctx.session_id, {"purpose": purpose})
 
-    def _compact(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _raise_if_cancelled(ctx: AgentContext) -> None:
+        if ctx.cancel_event and ctx.cancel_event.is_set():
+            raise asyncio.CancelledError()
+
+    @staticmethod
+    def _note_progress(
+        ctx: AgentContext,
+        *,
+        step: int | None = None,
+        max_steps: int | None = None,
+        phase: str | None = None,
+        tool_name: str | None = None,
+        sources: int | None = None,
+    ) -> None:
+        handle = ctx.reply_handle
+        if handle and hasattr(handle, "note_progress"):
+            try:
+                handle.note_progress(step=step, max_steps=max_steps, phase=phase, tool_name=tool_name, sources=sources)
+            except Exception:
+                pass
+
+    def _compact(self, messages: list[dict[str, Any]], ctx: AgentContext) -> list[dict[str, Any]]:
+        budget = getattr(ctx, "context_budget_chars", None) or self.settings.context_budget_chars
         total = sum(len(str(message.get("content") or "")) for message in messages)
-        if total <= self.settings.context_budget_chars:
+        if total <= budget:
             return messages
         if len(messages) <= 8:
             return messages
         return messages[:5] + [{"role": "system", "content": "[một phần lịch sử/tool result cũ đã được rút gọn]"}] + messages[-8:]
+
+    async def _trigger_rolling_summary(self, user_id: str, session_id: str) -> None:
+        try:
+            state = self.memory.get_session_state(user_id, session_id)
+            upto_id = state.get("summary_upto_message_id") or 0
+
+            with self.db.connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, role, content FROM messages
+                    WHERE user_id=? AND session_id=? AND id > ?
+                    ORDER BY id ASC
+                    """,
+                    (user_id, session_id, upto_id),
+                ).fetchall()
+
+            if not rows or len(rows) <= 6:
+                return
+
+            to_summarize = rows[:-2]
+            if not to_summarize:
+                return
+
+            last_summarized_id = to_summarize[-1]["id"]
+
+            messages_text = ""
+            for r in to_summarize:
+                messages_text += f"{r['role']}: {r['content']}\n"
+
+            old_summary = state.get("summary") or ""
+            prompt = (
+                "Tóm tắt phần hội thoại sau và kết hợp với tóm tắt cũ (nếu có) để tạo một tóm tắt hội thoại ngắn gọn (tối đa 1500 ký tự), tập trung vào các vấn đề đã thảo luận/kết luận, và các việc còn mở.\n"
+                f"Tóm tắt cũ: {old_summary}\n\n"
+                f"Các tin nhắn mới:\n{messages_text}\n"
+                "Trả về tóm tắt hội thoại mới bằng tiếng Việt ngắn gọn, súc tích (dưới 1500 ký tự):"
+            )
+
+            resp = await self.llm.chat(
+                self.settings.lite_model,
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=500,
+                timeout=min(20, self.settings.llm_timeout_seconds),
+            )
+
+            new_summary = resp.content.strip()[:1500]
+            state["summary"] = new_summary
+            state["summary_upto_message_id"] = last_summarized_id
+            self.memory.save_session_state(user_id, session_id, state)
+
+            self.audit.record(user_id, "session_summary_updated", session_id, {"last_message_id": last_summarized_id})
+        except Exception as e:
+            self.audit.record(user_id, "session_summary_error", session_id, {"error": str(e)})
 
     def _check_total_timeout(self, started: float, mode: str) -> None:
         if time.perf_counter() - started > self._total_timeout_for_mode(mode):

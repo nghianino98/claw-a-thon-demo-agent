@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from app import __version__
 from app.channels.base import IncomingMessage
-from app.channels.telegram.adapter import TelegramAdapter
+from app.channels.telegram.adapter import TelegramAdapter, telegram_command_alias
 from app.channels.telegram.client import TelegramClient
 from app.channels.telegram.polling import polling_loop
 from app.core.agent_loop import AgentLoop
@@ -36,6 +36,7 @@ from app.services.llm import LLMClient
 from app.services.memory import MemoryService
 from app.services.rate_limit import RateLimiter
 from app.services.registry import SkillRegistry, WorkflowRegistry
+from app.services.cron_scheduler import CronSchedulerService
 from app.settings import Settings, get_settings
 from app.utils import log_event, setup_logging, utc_now
 from app.web.auth import (
@@ -69,6 +70,7 @@ class Services:
     telegram_adapter: TelegramAdapter
     backup: BackupService
     guardrail: GuardrailService
+    cron_scheduler: CronSchedulerService
 
 
 class InvocationRequest(BaseModel):
@@ -99,6 +101,8 @@ class SkillCreate(BaseModel):
     triggers: str = ""
     content_override: str | None = None
     enabled: bool = True
+    command_alias: str | None = None
+    show_in_menu: bool = True
 
 
 class SkillUpdate(BaseModel):
@@ -107,6 +111,8 @@ class SkillUpdate(BaseModel):
     triggers: str | None = None
     content_override: str | None = None
     enabled: bool | None = None
+    command_alias: str | None = None
+    show_in_menu: bool | None = None
 
 
 class WorkflowCreate(BaseModel):
@@ -116,6 +122,8 @@ class WorkflowCreate(BaseModel):
     content_override: str | None = None
     schedule: str | None = None
     enabled: bool = True
+    command_alias: str | None = None
+    show_in_menu: bool = True
 
 
 class WorkflowUpdate(BaseModel):
@@ -124,10 +132,145 @@ class WorkflowUpdate(BaseModel):
     content_override: str | None = None
     schedule: str | None = None
     enabled: bool | None = None
+    command_alias: str | None = None
+    show_in_menu: bool | None = None
 
 
 def auth_actor(request: Request, fallback: str = "system") -> str:
     return str(getattr(request.state, "auth_actor", fallback))
+
+
+BUILTIN_COMMAND_ALIASES = {
+    "start",
+    "help",
+    "whoami",
+    "skills",
+    "workflows",
+    "run",
+    "cancel",
+    "forget",
+    "new",
+    "deep",
+    "approve",
+    "revoke",
+    "users",
+    "status",
+    "kb_activate",
+    "runs",
+}
+
+
+def schedule_telegram_command_sync(services: Services) -> None:
+    if services.telegram_client.configured:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(services.telegram_adapter.sync_commands())
+        else:
+            loop.create_task(services.telegram_adapter.sync_commands())
+
+
+def default_command_alias(entity_id: str) -> str:
+    return telegram_command_alias(entity_id.rsplit("/", 1)[-1] or entity_id)
+
+
+def validate_command_alias(
+    services: Services,
+    alias: str,
+    *,
+    entity_type: str,
+    entity_id: str,
+) -> str:
+    normalized = telegram_command_alias(alias)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="command_alias is invalid")
+    if normalized in BUILTIN_COMMAND_ALIASES:
+        raise HTTPException(status_code=409, detail="command_alias conflicts with built-in command")
+    with services.db.connect() as conn:
+        skills = conn.execute("SELECT skill_id, command_alias FROM skills").fetchall()
+        workflows = conn.execute("SELECT workflow_id, command_alias FROM workflows").fetchall()
+    for row in skills:
+        if entity_type == "skill" and row["skill_id"] == entity_id:
+            continue
+        if telegram_command_alias(row["command_alias"] or default_command_alias(row["skill_id"])) == normalized:
+            raise HTTPException(status_code=409, detail="command_alias already exists")
+    for row in workflows:
+        if entity_type == "workflow" and row["workflow_id"] == entity_id:
+            continue
+        if telegram_command_alias(row["command_alias"] or default_command_alias(row["workflow_id"])) == normalized:
+            raise HTTPException(status_code=409, detail="command_alias already exists")
+    return normalized
+
+
+def bump_registry_version(services: Services, actor: str) -> int:
+    with services.db.connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key='registry_version'").fetchone()
+        try:
+            version = int(row["value"]) if row else 0
+        except Exception:
+            version = 0
+        version += 1
+        conn.execute(
+            """
+            INSERT INTO settings(key, value, updated_at, updated_by)
+            VALUES ('registry_version', ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by
+            """,
+            (str(version), utc_now(), actor),
+        )
+        conn.commit()
+        return version
+
+
+def bump_registry_and_sync(services: Services, actor: str) -> None:
+    bump_registry_version(services, actor)
+    schedule_telegram_command_sync(services)
+
+
+def backup_warning(settings: Settings, backup: BackupService) -> str | None:
+    if settings.app_env == "production" and not backup.enabled:
+        return "production_backup_disabled: configure S3_* before go-live to preserve SQLite/KB state across redeploys"
+    if not backup.enabled:
+        return "backup_disabled: S3 backup is not configured"
+    return None
+
+
+def run_backup_best_effort(services: Services, reason: str, target: str, actor: str = "system") -> str | None:
+    if not services.backup.enabled:
+        return None
+    try:
+        key = services.backup.backup()
+        services.audit.record(actor, "backup_success", target, {"reason": reason, "key": key})
+        return key
+    except Exception as exc:
+        log_event("error", "backup_failed", reason=reason, target=target, error=str(exc))
+        services.audit.record(actor, "backup_failed", target, {"reason": reason, "error": str(exc)})
+        return None
+
+
+def validate_model_routing(services: Services, value: Any) -> None:
+    routing = value
+    if isinstance(value, str):
+        try:
+            routing = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid model_routing JSON: {exc}") from exc
+    if not isinstance(routing, dict):
+        raise HTTPException(status_code=400, detail="model_routing must be an object")
+    classes = routing.get("classes") or {}
+    if not isinstance(classes, dict):
+        raise HTTPException(status_code=400, detail="model_routing.classes must be an object")
+    tool_tasks = {"agent", "code"}
+    with services.db.connect() as conn:
+        for task_class, model in classes.items():
+            if task_class not in tool_tasks or not model:
+                continue
+            row = conn.execute("SELECT tool_native, tool_json FROM model_profiles WHERE model=?", (str(model),)).fetchone()
+            if not row or not (int(row["tool_native"]) or int(row["tool_json"])):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Model {model} is not profiled for tool calling required by {task_class}",
+                )
 
 
 def build_services(settings: Settings) -> Services:
@@ -157,12 +300,13 @@ def build_services(settings: Settings) -> Services:
     if (settings.kb_dir / "current").exists():
         kb.reload_registries()
     backup = BackupService(db, settings)
-    llm = LLMClient(settings)
+    llm = LLMClient(settings, db)
     tools = ToolRegistry(settings, kb, memory, skills)
     prompts = PromptBuilder(settings, config, memory, skills)
     agent_loop = AgentLoop(settings, db, llm, memory, tools, prompts, audit)
-    router = MessageRouter(agent_loop, skills, workflow_registry, audit, guardrail)
+    tools.query_expander = agent_loop.expand_query_with_lite
     workflows = WorkflowEngine(settings, db, workflow_registry, agent_loop, audit)
+    router = MessageRouter(agent_loop, skills, workflow_registry, audit, guardrail, workflows)
     telegram_adapter = TelegramAdapter(
         telegram_client,
         access,
@@ -174,6 +318,14 @@ def build_services(settings: Settings) -> Services:
         workflow_registry,
         audit,
         rate_limit,
+        backup,
+    )
+    cron_scheduler = CronSchedulerService(
+        db,
+        settings,
+        workflows,
+        audit,
+        telegram_client,
     )
     return Services(
         db,
@@ -195,6 +347,7 @@ def build_services(settings: Settings) -> Services:
         telegram_adapter,
         backup,
         guardrail,
+        cron_scheduler,
     )
 
 
@@ -224,6 +377,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services = build_services(settings)
         app.state.settings = settings
         app.state.services = services
+        warning = backup_warning(settings, services.backup)
+        if warning:
+            log_event("warning", "backup_warning", warning=warning)
 
         backup_task: asyncio.Task | None = None
         if services.backup.enabled:
@@ -243,7 +399,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.telegram_mode == "polling" and settings.telegram_bot_token:
             polling_task = asyncio.create_task(polling_loop(services.telegram_client, services.telegram_adapter))
             log_event("info", "telegram_polling_started")
+        if settings.telegram_bot_token:
+            asyncio.create_task(services.telegram_adapter.sync_commands())
+        services.cron_scheduler.start()
+        cleanup_task = asyncio.create_task(artifact_cleanup_loop(settings, services.db))
         yield
+        services.cron_scheduler.stop()
+        cleanup_task.cancel()
         if backup_task:
             backup_task.cancel()
         if polling_task:
@@ -341,6 +503,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         actor = auth_actor(request, "admin-api")
         instruction_id = services.config.set_instruction(body.name, body.content, actor)
         services.audit.record(actor, "instruction_update", body.name, {"id": instruction_id})
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "id": instruction_id}
 
     @app.post("/admin/api/instructions/{instruction_id}/activate", dependencies=[Depends(require_admin_operator)])
@@ -355,6 +518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             conn.execute("UPDATE instructions SET active=1 WHERE id=?", (instruction_id,))
             conn.commit()
         services.audit.record(actor, "instruction_activate", str(instruction_id), {"name": row["name"]})
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "id": instruction_id}
 
     @app.get("/admin/api/skills", dependencies=[Depends(require_admin_auth)])
@@ -369,19 +533,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid skill_id format")
         actor = auth_actor(request, "admin-api")
         now = utc_now()
+        alias = validate_command_alias(
+            services,
+            body.command_alias or default_command_alias(body.skill_id),
+            entity_type="skill",
+            entity_id=body.skill_id,
+        )
         with services.db.connect() as conn:
             exists = conn.execute("SELECT 1 FROM skills WHERE skill_id=?", (body.skill_id,)).fetchone()
             if exists:
                 raise HTTPException(status_code=409, detail="Skill already exists")
             conn.execute(
                 """
-                INSERT INTO skills(skill_id, name, description, triggers, source, kb_path, content_override, enabled, updated_at, updated_by)
-                VALUES (?,?,?,?, 'admin', NULL, ?, ?, ?, ?)
+                INSERT INTO skills(
+                    skill_id, name, description, triggers, source, kb_path, content_override,
+                    enabled, command_alias, show_in_menu, updated_at, updated_by
+                )
+                VALUES (?,?,?,?, 'admin', NULL, ?, ?, ?, ?, ?, ?)
                 """,
-                (body.skill_id, body.name, body.description, body.triggers, body.content_override, int(body.enabled), now, actor),
+                (
+                    body.skill_id,
+                    body.name,
+                    body.description,
+                    body.triggers,
+                    body.content_override,
+                    int(body.enabled),
+                    alias,
+                    int(body.show_in_menu),
+                    now,
+                    actor,
+                ),
             )
             conn.commit()
         services.audit.record(actor, "skill_create", body.skill_id, {"name": body.name})
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "skill_id": body.skill_id}
 
     @app.patch("/admin/api/skills/{skill_id}", dependencies=[Depends(require_admin_operator)])
@@ -393,12 +578,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             exists = conn.execute("SELECT 1 FROM skills WHERE skill_id=?", (skill_id,)).fetchone()
             if not exists:
                 raise HTTPException(status_code=404, detail="Skill not found")
-            
+
             updates = []
             params = []
             for field, val in body.model_dump(exclude_unset=True).items():
+                if field == "command_alias":
+                    val = validate_command_alias(
+                        services,
+                        str(val or default_command_alias(skill_id)),
+                        entity_type="skill",
+                        entity_id=skill_id,
+                    )
                 updates.append(f"{field}=?")
-                if field == "enabled":
+                if field in {"enabled", "show_in_menu"}:
                     params.append(int(val))
                 else:
                     params.append(val)
@@ -411,6 +603,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn.execute(query, tuple(params))
                 conn.commit()
         services.audit.record(actor, "skill_update", skill_id, body.model_dump(exclude_unset=True))
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "skill_id": skill_id}
 
     @app.get("/admin/api/workflows", dependencies=[Depends(require_admin_auth)])
@@ -425,19 +618,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid workflow_id format")
         actor = auth_actor(request, "admin-api")
         now = utc_now()
+        alias = validate_command_alias(
+            services,
+            body.command_alias or default_command_alias(body.workflow_id),
+            entity_type="workflow",
+            entity_id=body.workflow_id,
+        )
         with services.db.connect() as conn:
             exists = conn.execute("SELECT 1 FROM workflows WHERE workflow_id=?", (body.workflow_id,)).fetchone()
             if exists:
                 raise HTTPException(status_code=409, detail="Workflow already exists")
             conn.execute(
                 """
-                INSERT INTO workflows(workflow_id, name, description, source, kb_path, content_override, schedule, enabled, updated_at, updated_by)
-                VALUES (?,?,?, 'admin', NULL, ?, ?, ?, ?, ?)
+                INSERT INTO workflows(
+                    workflow_id, name, description, source, kb_path, content_override,
+                    schedule, enabled, command_alias, show_in_menu, updated_at, updated_by
+                )
+                VALUES (?,?,?, 'admin', NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (body.workflow_id, body.name, body.description, body.content_override, body.schedule, int(body.enabled), now, actor),
+                (
+                    body.workflow_id,
+                    body.name,
+                    body.description,
+                    body.content_override,
+                    body.schedule,
+                    int(body.enabled),
+                    alias,
+                    int(body.show_in_menu),
+                    now,
+                    actor,
+                ),
             )
             conn.commit()
         services.audit.record(actor, "workflow_create", body.workflow_id, {"name": body.name})
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "workflow_id": body.workflow_id}
 
     @app.patch("/admin/api/workflows/{workflow_id}", dependencies=[Depends(require_admin_operator)])
@@ -449,12 +663,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             exists = conn.execute("SELECT 1 FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if not exists:
                 raise HTTPException(status_code=404, detail="Workflow not found")
-            
+
             updates = []
             params = []
             for field, val in body.model_dump(exclude_unset=True).items():
+                if field == "command_alias":
+                    val = validate_command_alias(
+                        services,
+                        str(val or default_command_alias(workflow_id)),
+                        entity_type="workflow",
+                        entity_id=workflow_id,
+                    )
                 updates.append(f"{field}=?")
-                if field == "enabled":
+                if field in {"enabled", "show_in_menu"}:
                     params.append(int(val))
                 else:
                     params.append(val)
@@ -467,6 +688,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 conn.execute(query, tuple(params))
                 conn.commit()
         services.audit.record(actor, "workflow_update", workflow_id, body.model_dump(exclude_unset=True))
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "workflow_id": workflow_id}
 
     @app.get("/admin/api/kb", dependencies=[Depends(require_admin_auth)])
@@ -486,9 +708,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/admin/api/kb/{version_id:int}/activate", dependencies=[Depends(require_admin_operator)])
     async def admin_kb_activate(request: Request, version_id: int, background_tasks: BackgroundTasks):
         services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
         services.kb.activate_version(version_id)
         if services.backup.enabled:
-            background_tasks.add_task(services.backup.backup)
+            background_tasks.add_task(run_backup_best_effort, services, "kb_activate", f"kb:{version_id}", actor)
+        bump_registry_and_sync(services, actor)
         return {"status": "success"}
 
     @app.post("/admin/api/kb/search-test", dependencies=[Depends(require_admin_auth)])
@@ -522,12 +746,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         def process_upload() -> None:
             try:
-                services.kb.build_from_zip(upload_path, uploaded_by=auth_actor(request, "admin-api"), activate=activate)
+                version_id = services.kb.build_from_zip(upload_path, uploaded_by=actor, activate=activate)
+                if activate:
+                    run_backup_best_effort(services, "kb_upload_activate", f"kb:{version_id}", actor)
+                    bump_registry_and_sync(services, actor)
             finally:
                 upload_path.unlink(missing_ok=True)
 
+        actor = auth_actor(request, "admin-api")
         background_tasks.add_task(process_upload)
-        services.audit.record(auth_actor(request, "admin-api"), "kb_upload_requested", file.filename, {"activate": activate, "bytes": size})
+        services.audit.record(actor, "kb_upload_requested", file.filename, {"activate": activate, "bytes": size})
         return {"status": "accepted", "filename": file.filename, "bytes": size, "activate": activate}
 
     @app.post("/admin/api/kb/chunked/start", dependencies=[Depends(require_admin_operator)])
@@ -597,14 +825,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         def process_chunked_upload() -> None:
             try:
-                services.kb.build_from_zip(merged, uploaded_by=auth_actor(request, "admin-api"), activate=bool(meta.get("activate", True)))
+                activate_upload = bool(meta.get("activate", True))
+                version_id = services.kb.build_from_zip(merged, uploaded_by=actor, activate=activate_upload)
+                if activate_upload:
+                    run_backup_best_effort(services, "kb_chunked_upload_activate", f"kb:{version_id}", actor)
+                    bump_registry_and_sync(services, actor)
             finally:
                 import shutil
 
                 shutil.rmtree(upload_dir, ignore_errors=True)
 
+        actor = auth_actor(request, "admin-api")
         background_tasks.add_task(process_chunked_upload)
-        services.audit.record(auth_actor(request, "admin-api"), "kb_chunked_upload_complete", upload_id, {"filename": meta["filename"], "parts": total_parts})
+        services.audit.record(actor, "kb_chunked_upload_complete", upload_id, {"filename": meta["filename"], "parts": total_parts})
         return {"status": "accepted", "upload_id": upload_id, "filename": meta["filename"], "parts": total_parts}
 
     @app.get("/admin/api/access", dependencies=[Depends(require_admin_auth)])
@@ -660,10 +893,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for key, value in values.items():
             if key not in allowed:
                 raise HTTPException(status_code=400, detail=f"Setting is not writable: {key}")
+            if key == "model_routing":
+                validate_model_routing(services, value)
             val = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
             services.config.set_setting(key, val, actor)
             changed[key] = val
         services.audit.record(actor, "settings_update", "settings", {"keys": sorted(changed)})
+        bump_registry_and_sync(services, actor)
         return {"status": "success", "settings": changed}
 
     @app.get("/admin/api/kb/manifest", dependencies=[Depends(require_sync_or_admin_auth)])
@@ -734,18 +970,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise HTTPException(status_code=413, detail="Delta archive exceeds KB_DELTA_MAX_MB")
                 handle.write(chunk)
 
+        actor = auth_actor(request, "sync-api")
+
         async def process_delta_task() -> None:
             try:
-                await services.kb.apply_delta(upload_path, meta_data, uploaded_by=auth_actor(request, "sync-api"))
-                if services.backup.enabled:
-                    services.backup.backup()
+                version_id = await services.kb.apply_delta(upload_path, meta_data, uploaded_by=actor)
+                if services.kb.active_version() == version_id:
+                    run_backup_best_effort(services, "kb_delta_activate", f"kb:{version_id}", actor)
+                    bump_registry_and_sync(services, actor)
             except Exception as e:
                 log_event("error", "delta_sync_failed", error=str(e))
             finally:
                 upload_path.unlink(missing_ok=True)
 
         background_tasks.add_task(process_delta_task)
-        services.audit.record(auth_actor(request, "sync-api"), "kb_delta_requested", archive.filename, {"base_version": base_version, "bytes": size})
+        services.audit.record(actor, "kb_delta_requested", archive.filename, {"base_version": base_version, "bytes": size})
         return {"status": "success", "message": "Delta sync accepted", "bytes": size}
 
     @app.get("/admin/api/runs", dependencies=[Depends(require_admin_auth)])
@@ -801,10 +1040,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/api/backup", dependencies=[Depends(require_admin_auth)])
     async def admin_list_backups(request: Request):
         services: Services = request.app.state.services
+        warning = backup_warning(request.app.state.settings, services.backup)
         if not services.backup.enabled:
-            return {"status": "success", "backups": []}
+            return {"status": "success", "enabled": False, "backups": [], "warning": warning}
         backups = services.backup.list_backups()
-        return {"status": "success", "backups": backups}
+        payload = {"status": "success", "enabled": True, "backups": backups}
+        if warning:
+            payload["warning"] = warning
+        return payload
 
     @app.post("/admin/api/backup/restore", dependencies=[Depends(require_admin_superadmin)])
     async def admin_restore(request: Request, body: dict[str, Any]):
@@ -812,7 +1055,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not services.backup.enabled:
             raise HTTPException(status_code=400, detail="S3 backup is not configured/enabled")
 
-        if any(task for task in services.workflows.tasks.values() if task.status == "running"):
+        if any(not task.done() for task in services.workflows.tasks.values()):
             raise HTTPException(status_code=409, detail="Cannot restore while workflows are running")
 
         key = body.get("key")
@@ -828,6 +1071,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     return app
+
+
+async def artifact_cleanup_loop(settings: Settings, db: Database):
+    while True:
+        try:
+            log_event("info", "artifact_cleanup_started")
+            from datetime import datetime, UTC, timedelta
+            limit_dt = datetime.now(UTC) - timedelta(days=settings.artifact_retention_days)
+            limit_str = limit_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+            with db.connect() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM workflow_runs WHERE finished_at IS NOT NULL AND finished_at < ?",
+                    (limit_str,)
+                ).fetchall()
+
+            run_ids = [int(r["id"]) for r in rows]
+
+            if run_ids:
+                import shutil
+                for rid in run_ids:
+                    run_dir = settings.artifacts_dir / str(rid)
+                    if run_dir.exists() and run_dir.is_dir():
+                        try:
+                            shutil.rmtree(run_dir)
+                            log_event("info", "artifact_cleanup_dir_deleted", run_id=rid)
+                        except Exception as e:
+                            log_event("error", "artifact_cleanup_dir_delete_failed", run_id=rid, error=str(e))
+
+                with db.connect() as conn:
+                    conn.execute("PRAGMA busy_timeout=1000")
+                    conn.execute(
+                        f"DELETE FROM tg_anchors WHERE ref_id IN ({','.join('?' for _ in run_ids)})",
+                        tuple(run_ids)
+                    )
+                    conn.execute(
+                        f"DELETE FROM workflow_runs WHERE id IN ({','.join('?' for _ in run_ids)})",
+                        tuple(run_ids)
+                    )
+                    conn.commit()
+                log_event("info", "artifact_cleanup_success", count=len(run_ids))
+        except Exception as e:
+            log_event("error", "artifact_cleanup_failed", error=str(e))
+
+        await asyncio.sleep(24 * 3600)
 
 
 app = create_app()

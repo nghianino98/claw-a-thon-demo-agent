@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from app.channels.base import IncomingMessage
+from app.channels.telegram.adapter import TelegramAdapter, TelegramReplyHandle
 from app.core.agent_loop import AgentLoop
 from app.core.prompts import PromptBuilder
 from app.core.router import MessageRouter
 from app.core.tools import ToolRegistry
+from app.core.workflows import WorkflowEngine
 from app.core.types import AgentContext
 from app.db import Database, run_migrations
 from app.services.access import AccessService
@@ -34,8 +36,11 @@ class FakeLLM:
         self.responses = responses
         self.calls: list[dict[str, Any]] = []
 
-    async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None, timeout=None):
-        self.calls.append({"model": model, "messages": copy.deepcopy(messages), "tools": tools, "max_tokens": max_tokens})
+    def resolve_model(self, task_class: str, user_id: str | None = None) -> str:
+        return "model"
+
+    async def chat(self, model, messages, tools=None, temperature=None, max_tokens=None, timeout=None, user_id=None, task_class=None):
+        self.calls.append({"model": model, "messages": copy.deepcopy(messages), "tools": tools, "max_tokens": max_tokens, "task_class": task_class})
         if not self.responses:
             return LLMResponse(content="final")
         response = self.responses.pop(0)
@@ -267,6 +272,34 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(len(fake.calls), 3)
             self.assertIn("deep research", fake.calls[0]["messages"][0]["content"])
             self.assertEqual(fake.calls[0]["messages"][-1]["content"], "FD là gì?")
+            with services["db"].connect() as conn:
+                row = conn.execute("SELECT COUNT(*) AS n FROM llm_calls WHERE purpose='deep'").fetchone()
+            self.assertEqual(row["n"], 3)
+
+    def test_tool_budget_uses_context_limits(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source = tmp / "source"
+            (source / "05. Knowledge" / "FD").mkdir(parents=True)
+            (source / "05. Knowledge" / "FD" / "FD.md").write_text("# FD\n\n" + ("x" * 500), encoding="utf-8")
+            settings = make_settings(tmp / "state", KB_READ_MAX_CHARS=40, TOOL_RESULT_MAX_CHARS=60)
+            db = Database(settings.db_path)
+            run_migrations(db)
+            memory = MemoryService(db)
+            skills = SkillRegistry(db, settings.kb_dir / "current")
+            workflows = WorkflowRegistry(db, settings.kb_dir / "current")
+            kb = KBService(db, settings, skill_registry=skills, workflow_registry=workflows)
+            kb.build_from_directory(source, activate=True)
+            tools = ToolRegistry(settings, kb, memory, skills)
+            ctx = AgentContext("u", "s", "read", "deep")
+            ctx.tool_result_max_chars = 120
+            ctx.kb_read_max_chars = 100
+
+            result = asyncio.run(tools.execute("kb_read", {"path": "05. Knowledge/FD/FD.md"}, ctx))
+
+            self.assertGreater(len(result), settings.tool_result_max_chars)
+            self.assertLessEqual(len(result), 120 + len("\n[tool result truncated]"))
+            self.assertIn("[đã cắt bớt", result)
 
     def test_agent_loop_json_tool_call(self):
         with tempfile.TemporaryDirectory() as td:
@@ -433,6 +466,62 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(reply.mode, "static")
             self.assertEqual(fake.calls, [])
 
+    def test_router_nl_workflow_intent_requires_confirmation_and_starts(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(
+                Path(td),
+                LLM_BASE_URL="http://llm",
+                LLM_MODEL="model",
+                LLM_MODEL_LITE="lite",
+            )
+            with services["db"].connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO workflows(workflow_id, name, description, source, kb_path, content_override, enabled, command_alias, show_in_menu, updated_at)
+                    VALUES ('product-audit', 'Product Audit', 'Audit MMF hoặc FD', 'admin', NULL, '1. Audit', 1, 'product_audit', 1, 'now')
+                    """
+                )
+                conn.commit()
+            fake_llm = FakeLLM(
+                [
+                    LLMResponse(
+                        content='{"intent":"workflow","workflow_id":"product-audit","params":"MMF quick scan"}',
+                        usage={"prompt_tokens": 1, "completion_tokens": 1},
+                    )
+                ]
+            )
+            fake_engine = FakeWorkflowEngine()
+            services["loop"].llm = fake_llm
+            services["router"].workflow_engine = fake_engine
+
+            first = asyncio.run(
+                services["router"].handle(
+                    IncomingMessage(
+                        user_id="u",
+                        session_id="s",
+                        text="chạy audit MMF quick scan giúp mình",
+                        channel="test",
+                        actor="u",
+                    )
+                )
+            )
+            self.assertEqual(first.mode, "workflow_confirm")
+            self.assertIn("Product Audit", first.text)
+            self.assertEqual(fake_engine.started, [])
+            state = services["loop"].memory.get_session_state("u", "s")
+            self.assertIn("workflow_confirm", state["pending_question"])
+
+            second = asyncio.run(
+                services["router"].handle(
+                    IncomingMessage(user_id="u", session_id="s", text="Có", channel="test", actor="u")
+                )
+            )
+            self.assertEqual(second.mode, "workflow_start")
+            self.assertEqual(fake_engine.started, [("product-audit", "MMF quick scan", "test", "u")])
+            state = services["loop"].memory.get_session_state("u", "s")
+            self.assertIsNone(state["pending_question"])
+            self.assertEqual(state["last_run_id"], 7)
+
     def test_router_audit_records_answer_provenance(self):
         with tempfile.TemporaryDirectory() as td:
             services = build_test_services(Path(td))
@@ -457,15 +546,15 @@ class CoreTests(unittest.TestCase):
             memory = services["loop"].memory
             prompts = services["loop"].prompts
             ctx = AgentContext(user_id="user_test_role", session_id="s", message="hello", mode="qa")
-            
+
             # Initially no facts
             prompt_initial = prompts.build(ctx)
             self.assertNotIn("USER INFO REMINDER", prompt_initial)
-            
+
             # Upsert role and department facts
             memory.upsert_fact("user_test_role", "role", "Product Manager")
             memory.upsert_fact("user_test_role", "department", "Wealth Solution")
-            
+
             prompt_after = prompts.build(ctx)
             self.assertIn("USER INFO REMINDER", prompt_after)
             self.assertIn("Vai trò của người dùng hiện tại là: Product Manager", prompt_after)
@@ -478,13 +567,143 @@ class CoreTests(unittest.TestCase):
             prompts = services["loop"].prompts
             ctx = AgentContext(user_id="u", session_id="s", message="hello", mode="qa")
             prompt = prompts.build(ctx)
-            
+
             # Assert that old instruction telling LLM to explain is removed
             self.assertNotIn("Theo tài liệu PRD và theo thực tế triển khai code", prompt)
-            
+
             # Assert that instructions forbid exposing internal agent details/actions
             self.assertIn("TUYỆT ĐỐI không dùng các câu dẫn khai báo quy trình làm việc", prompt)
             self.assertIn("TUYỆT ĐỐI KHÔNG giải thích các bước tìm kiếm", prompt)
+
+    def test_telegram_dispatch_uses_existing_user_message_without_double_history(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                stack = build_telegram_test_stack(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+                fake = FakeLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[ToolCall(id="1", name="kb_search", arguments={"query": "FD", "top_k": 1})],
+                            raw_message={
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {"id": "1", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
+                                ],
+                            },
+                        ),
+                        LLMResponse(content="Chào bạn, mình trả lời từ KB."),
+                    ]
+                )
+                stack["loop"].llm = fake
+                await stack["adapter"]._dispatch_allowed(
+                    {"id": 200, "first_name": "Tester"},
+                    300,
+                    "FD là gì?",
+                    owner=False,
+                    raw_message={"message_id": 10, "text": "FD là gì?"},
+                )
+                rows = stack["memory"].recent_messages("tg-200", "tg-chat-300", 10)
+                self.assertEqual([row["role"] for row in rows], ["user", "assistant"])
+                self.assertEqual(rows[0]["content"], "FD là gì?")
+                self.assertEqual(stack["client"].messages[-1]["text"], "Chào bạn, mình trả lời từ KB.")
+
+        asyncio.run(run())
+
+    def test_dynamic_commands_sync_resolve_and_skill_activation(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                stack = build_telegram_test_stack(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+                with stack["db"].connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO workflows(workflow_id, name, description, source, kb_path, content_override, enabled, command_alias, show_in_menu, updated_at)
+                        VALUES ('product-audit', 'Product Audit', 'Audit', 'admin', NULL, 'Step one', 1, NULL, 1, 'now')
+                        """
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO skills(skill_id, name, description, triggers, source, kb_path, content_override, enabled, command_alias, show_in_menu, updated_at)
+                        VALUES ('research-skill', 'Research', 'Research skill', '', 'admin', NULL, 'Skill body', 1, 'research', 1, 'now')
+                        """
+                    )
+                    conn.commit()
+
+                await stack["adapter"].sync_commands()
+                commands = {cmd["command"] for cmd in stack["client"].commands}
+                self.assertIn("product_audit", commands)
+                self.assertIn("research", commands)
+
+                handle = TelegramReplyHandle(stack["client"], 300, stack["db"])
+                self.assertTrue(await stack["adapter"]._dynamic_command("/product_audit", "raw params", 200, handle))
+                self.assertEqual(stack["workflows"].started[0], ("product-audit", "raw params", "telegram", "tg-200"))
+
+                self.assertTrue(await stack["adapter"]._dynamic_command("/research", "", 200, handle))
+                state = stack["memory"].get_session_state("tg-200", "tg-chat-300")
+                self.assertEqual(state["active_skill"], "research-skill")
+
+                fake = FakeLLM(
+                    [
+                        LLMResponse(
+                            content="",
+                            tool_calls=[ToolCall(id="1", name="kb_search", arguments={"query": "FD", "top_k": 1})],
+                            raw_message={
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {"id": "1", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
+                                ],
+                            },
+                        ),
+                        LLMResponse(content="Kết quả theo skill."),
+                    ]
+                )
+                stack["loop"].llm = fake
+                handled = await stack["adapter"]._dynamic_command("/research", "hãy phân tích FD", 200, handle)
+                self.assertEqual(handled, "no_record")
+                self.assertEqual(stack["client"].messages[-1]["text"], "Kết quả theo skill.")
+
+        asyncio.run(run())
+
+    def test_telegram_reply_handle_records_anchors(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = make_settings(Path(td) / "state")
+                db = Database(settings.db_path)
+                run_migrations(db)
+                client = FakeTelegramClient()
+                handle = TelegramReplyHandle(client, 300, db)
+                handle.run_id = 42
+
+                text_id = await handle.send_text("progress")
+                doc_id = await handle.send_document("/tmp/report.md", "report")
+
+                with db.connect() as conn:
+                    rows = conn.execute("SELECT tg_message_id, kind, ref_id FROM tg_anchors ORDER BY tg_message_id").fetchall()
+                self.assertEqual([(row["tg_message_id"], row["kind"], row["ref_id"]) for row in rows], [(text_id, "run_progress", 42), (doc_id, "artifact", 42)])
+
+        asyncio.run(run())
+
+    def test_telegram_progress_message_is_edited(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = make_settings(Path(td) / "state")
+                db = Database(settings.db_path)
+                run_migrations(db)
+                client = FakeTelegramClient()
+                handle = TelegramReplyHandle(client, 300, db)
+                handle.note_progress(step=3, max_steps=24, tool_name="kb_read", sources=4)
+
+                await handle.send_or_edit_progress()
+                await handle.send_or_edit_progress()
+                await handle.finish_progress()
+
+                self.assertEqual(len(client.messages), 1)
+                self.assertGreaterEqual(len(client.edits), 2)
+                self.assertIn("bước 3/24", client.messages[0]["text"])
+                self.assertEqual(client.edits[-1]["text"], "Xong.")
+
+        asyncio.run(run())
 
 
 
@@ -543,6 +762,96 @@ class MockS3Client:
             self.files.pop(obj["Key"], None)
 
 
+class FakeTelegramClient:
+    configured = True
+
+    def __init__(self):
+        self.messages: list[dict[str, Any]] = []
+        self.documents: list[dict[str, Any]] = []
+        self.commands: list[dict[str, str]] = []
+        self.actions: list[tuple[int, str]] = []
+        self.edits: list[dict[str, Any]] = []
+        self._next_id = 1000
+
+    def _message_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    async def send_message(self, chat_id: int, text: str, reply_markup=None, parse_mode: str | None = "HTML") -> int:
+        msg_id = self._message_id()
+        self.messages.append({"chat_id": chat_id, "text": text, "message_id": msg_id})
+        return msg_id
+
+    async def send_document(self, chat_id: int, path: str, caption: str | None = None) -> int:
+        msg_id = self._message_id()
+        self.documents.append({"chat_id": chat_id, "path": path, "caption": caption, "message_id": msg_id})
+        return msg_id
+
+    async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        self.actions.append((chat_id, action))
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str, parse_mode: str | None = "HTML") -> bool:
+        self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        return True
+
+    async def set_my_commands(self, commands: list[dict[str, str]]) -> bool:
+        self.commands = commands
+        return True
+
+
+class FakeWorkflowEngine:
+    def __init__(self):
+        self.started: list[tuple[str, str, str, str]] = []
+
+    async def start(self, workflow_id: str, raw_params: str, trigger: str, triggered_by: str, reply_handle=None) -> int:
+        self.started.append((workflow_id, raw_params, trigger, triggered_by))
+        return 7
+
+    async def cancel(self, run_id: int, actor: str) -> bool:
+        return False
+
+    def recent_runs(self, limit: int = 5) -> list[dict[str, Any]]:
+        return []
+
+
+def build_telegram_test_stack(tmp: Path, **overrides: Any) -> dict[str, Any]:
+    settings = make_settings(tmp / "state", TELEGRAM_BOT_TOKEN="token", **overrides)
+    db = Database(settings.db_path)
+    run_migrations(db)
+    audit = AuditService(db)
+    config = ConfigService(db)
+    memory = MemoryService(db)
+    access = AccessService(db, settings)
+    rate_limit = RateLimiter(db, settings)
+    skills = SkillRegistry(db, settings.kb_dir / "current")
+    workflow_registry = WorkflowRegistry(db, settings.kb_dir / "current")
+    kb = KBService(db, settings, audit, skills, workflow_registry)
+    kb.ensure_dirs()
+    source = tmp / "kb-source"
+    (source / "05. Knowledge" / "FD").mkdir(parents=True, exist_ok=True)
+    (source / "05. Knowledge" / "FD" / "FD.md").write_text("# FD\n\nFD test content.", encoding="utf-8")
+    kb.build_from_directory(source, activate=True)
+    tools = ToolRegistry(settings, kb, memory, skills)
+    prompts = PromptBuilder(settings, config, memory, skills)
+    loop = AgentLoop(settings, db, FakeLLM([]), memory, tools, prompts, audit)
+    router = MessageRouter(loop, skills, workflow_registry, audit, GuardrailService(settings))
+    client = FakeTelegramClient()
+    workflows = FakeWorkflowEngine()
+    adapter = TelegramAdapter(client, access, router, workflows, kb, memory, skills, workflow_registry, audit, rate_limit)
+    return {
+        "settings": settings,
+        "db": db,
+        "audit": audit,
+        "memory": memory,
+        "kb": kb,
+        "loop": loop,
+        "router": router,
+        "client": client,
+        "workflows": workflows,
+        "adapter": adapter,
+    }
+
+
 class BackupAndDeltaTests(unittest.TestCase):
     def test_symlink_is_relative(self):
         import os
@@ -551,13 +860,13 @@ class BackupAndDeltaTests(unittest.TestCase):
             source = tmp / "source"
             (source / "05. Knowledge" / "FD").mkdir(parents=True)
             (source / "05. Knowledge" / "FD" / "FD.md").write_text("# FD\n\ncontent", encoding="utf-8")
-            
+
             settings = make_settings(tmp / "state")
             db = Database(settings.db_path)
             run_migrations(db)
             kb = KBService(db, settings)
             kb.build_from_directory(source, activate=True)
-            
+
             link_target = os.readlink(kb.current_link)
             self.assertEqual(link_target, "versions/1")
             self.assertTrue(kb.current_link.exists())
@@ -571,13 +880,13 @@ class BackupAndDeltaTests(unittest.TestCase):
             (source / "05. Knowledge" / "FD" / "FD.md").write_text("# Fixed Deposit Product Spec\n\nInterest rate details.", encoding="utf-8")
             (source / "02. Context" / "CS").mkdir(parents=True)
             (source / "02. Context" / "CS" / "notes.md").write_text("# CS Notes Fixed Deposit Product Spec\n\nCS notes.", encoding="utf-8")
-            
+
             settings = make_settings(tmp / "state")
             db = Database(settings.db_path)
             run_migrations(db)
             kb = KBService(db, settings)
             kb.build_from_directory(source, activate=True)
-            
+
             hits = kb.search("Fixed Deposit Product Spec")
             self.assertTrue(len(hits) >= 2)
             self.assertIn("05. Knowledge", hits[0].path)
@@ -592,7 +901,7 @@ class BackupAndDeltaTests(unittest.TestCase):
             source = tmp / "source"
             (source / "05. Knowledge" / "FD").mkdir(parents=True)
             (source / "05. Knowledge" / "FD" / "FD.md").write_text("# Fixed Deposit\n\nHello from KB.", encoding="utf-8")
-            
+
             settings = make_settings(
                 tmp / "state",
                 S3_ENDPOINT="http://mock-s3",
@@ -602,38 +911,38 @@ class BackupAndDeltaTests(unittest.TestCase):
             )
             db = Database(settings.db_path)
             run_migrations(db)
-            
+
             kb = KBService(db, settings)
             kb.build_from_directory(source, activate=True)
-            
+
             from app.services.backup import BackupService
             mock_s3 = MockS3Client()
             import unittest.mock
             with unittest.mock.patch("boto3.client", return_value=mock_s3):
                 backup_service = BackupService(db, settings)
                 self.assertTrue(backup_service.enabled)
-                
+
                 key = backup_service.backup()
                 self.assertTrue(key.startswith("queo-backups/queo-"))
                 self.assertIn(key, mock_s3.files)
-                
+
                 backups = backup_service.list_backups()
                 self.assertEqual(len(backups), 1)
                 self.assertEqual(backups[0]["key"], key)
-                
+
                 shutil.rmtree(settings.state_dir)
-                
+
                 db_restored = Database(settings.db_path)
                 backup_service_restore = BackupService(db_restored, settings)
                 restored = backup_service_restore.restore(key)
                 self.assertTrue(restored)
-                
+
                 self.assertTrue(settings.db_path.exists())
                 kb_restored = KBService(db_restored, settings)
                 self.assertEqual(kb_restored.active_version(), 1)
                 self.assertTrue(kb_restored.current_link.exists())
                 self.assertEqual(os.readlink(kb_restored.current_link), "versions/1")
-                
+
                 hits = kb_restored.search("Fixed Deposit")
                 self.assertTrue(hits)
                 self.assertEqual(hits[0].path, "05. Knowledge/FD/FD.md")
@@ -650,25 +959,25 @@ class BackupAndDeltaTests(unittest.TestCase):
             (source / "05. Knowledge" / "FD").mkdir(parents=True)
             (source / "05. Knowledge" / "FD" / "FD.md").write_text("# Fixed Deposit\n\nHello v1.", encoding="utf-8")
             (source / "05. Knowledge" / "FD" / "OLD.md").write_text("# Old File\n\nGoing to be deleted.", encoding="utf-8")
-            
+
             settings = make_settings(tmp / "state", KB_SYNC_ACTIVATE="auto")
             db = Database(settings.db_path)
             run_migrations(db)
-            
+
             kb = KBService(db, settings)
             v1_id = kb.build_from_directory(source, activate=True)
-            
+
             delta_source = tmp / "delta_source"
             delta_source.mkdir()
             (delta_source / "05. Knowledge" / "FD").mkdir(parents=True)
             (delta_source / "05. Knowledge" / "FD" / "FD.md").write_text("# Fixed Deposit\n\nHello v2 modified.", encoding="utf-8")
             (delta_source / "05. Knowledge" / "FD" / "NEW.md").write_text("# New File\n\nAdded in delta.", encoding="utf-8")
-            
+
             delta_zip_path = tmp / "delta.zip"
             with zipfile.ZipFile(delta_zip_path, "w") as zf:
                 zf.write(delta_source / "05. Knowledge" / "FD" / "FD.md", "05. Knowledge/FD/FD.md")
                 zf.write(delta_source / "05. Knowledge" / "FD" / "NEW.md", "05. Knowledge/FD/NEW.md")
-                
+
             final_files = {
                 "05. Knowledge/FD/FD.md": {
                     "sha256": sha256_file(delta_source / "05. Knowledge" / "FD" / "FD.md"),
@@ -681,7 +990,7 @@ class BackupAndDeltaTests(unittest.TestCase):
             }
             manifest_json = json.dumps({k: v for k, v in sorted(final_files.items())}, separators=(",", ":"), sort_keys=True)
             client_manifest_sha = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
-            
+
             meta = {
                 "base_version": v1_id,
                 "client_host": "test-macbook",
@@ -689,27 +998,27 @@ class BackupAndDeltaTests(unittest.TestCase):
                 "added_modified": ["05. Knowledge/FD/FD.md", "05. Knowledge/FD/NEW.md"],
                 "client_manifest_sha": client_manifest_sha
             }
-            
+
             v2_id = asyncio.run(kb.apply_delta(delta_zip_path, meta))
-            
+
             self.assertEqual(v2_id, 2)
             self.assertEqual(kb.active_version(), 2)
-            
+
             self.assertFalse((kb.versions_dir / "2" / "05. Knowledge/FD/OLD.md").exists())
             self.assertTrue((kb.versions_dir / "2" / "05. Knowledge/FD/FD.md").exists())
             self.assertTrue((kb.versions_dir / "2" / "05. Knowledge/FD/NEW.md").exists())
-            
+
             self.assertEqual((kb.versions_dir / "1" / "05. Knowledge/FD/FD.md").read_text(encoding="utf-8"), "# Fixed Deposit\n\nHello v1.")
             self.assertEqual((kb.versions_dir / "2" / "05. Knowledge/FD/FD.md").read_text(encoding="utf-8"), "# Fixed Deposit\n\nHello v2 modified.")
-            
+
             hits_new = kb.search("Added in delta")
             self.assertTrue(hits_new)
             self.assertEqual(hits_new[0].path, "05. Knowledge/FD/NEW.md")
-            
+
             hits_mod = kb.search("Hello v2 modified")
             self.assertTrue(hits_mod)
             self.assertEqual(hits_mod[0].path, "05. Knowledge/FD/FD.md")
-            
+
             hits_old = kb.search("Going to be deleted")
             self.assertFalse(hits_old)
 
@@ -719,7 +1028,7 @@ class BackupAndDeltaTests(unittest.TestCase):
         self.assertEqual(KBService._classify_product("03. Fact/Source Code/Stock/trading-payment/config/config.go"), "Stock")
         self.assertEqual(KBService._classify_product("03. Fact/Source Code/Stock/trading-payment/internal/adapter/acquiring/refund.go"), "Stock")
         self.assertEqual(KBService._classify_product("03. Fact/Source Code/FS Profile/financial-profile/config/config.yaml"), "FS Profile")
-        
+
         # Test word-bounded fallbacks
         self.assertEqual(KBService._classify_product("05. Knowledge/FD/FD - Product Knowledge Base - Opus 4.8.md"), "FD")
         self.assertEqual(KBService._classify_product("02. Context/Others/04. Stock/Audit/Stock_Audit.md"), "Stock")
@@ -732,6 +1041,55 @@ class BackupAndDeltaTests(unittest.TestCase):
         self.assertIn("controller", match_query)
         self.assertIn("handler", match_query)
         self.assertIn("stock", match_query)
+
+    def test_search_async_precision_and_rrf(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source = tmp / "source"
+            (source / "05. Knowledge" / "FD").mkdir(parents=True)
+            (source / "05. Knowledge" / "FD" / "FD.md").write_text(
+                "# Fixed Deposit Product\n\nNạp tiền vào tài khoản tiết kiệm FD rất đơn giản và an toàn.",
+                encoding="utf-8",
+            )
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+            kb = KBService(db, settings)
+            kb.build_from_directory(source, activate=True)
+
+            hits = asyncio.run(kb.search_async("nạp tiền FD"))
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].path, "05. Knowledge/FD/FD.md")
+            self.assertIn("[Breadcrumb: FD.md > Fixed Deposit Product]", hits[0].snippet)
+
+    def test_cron_scheduler_triggers(self):
+        import asyncio
+        from app.services.cron_scheduler import CronSchedulerService
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+
+            with db.connect() as conn:
+                conn.execute(
+                    "INSERT INTO workflows(workflow_id, name, description, source, kb_path, schedule, enabled, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    ("daily_report", "Daily Report", "Desc", "admin", "kb_path", "0 0 * * *", 1, "now")
+                )
+                conn.commit()
+
+            engine = FakeWorkflowEngine()
+            audit = AuditService(db)
+            scheduler = CronSchedulerService(db, settings, engine, audit, telegram_client=None)
+
+            asyncio.run(scheduler._reload_schedules())
+            self.assertIn("daily_report", scheduler._schedules)
+            self.assertEqual(scheduler._schedules["daily_report"], "0 0 * * *")
+            self.assertTrue(scheduler._next_runs["daily_report"] > 0)
+
+            asyncio.run(scheduler._run_workflow("daily_report"))
+            self.assertEqual(engine.started[0], ("daily_report", "", "schedule", "scheduler"))
 
 
 if __name__ == "__main__":

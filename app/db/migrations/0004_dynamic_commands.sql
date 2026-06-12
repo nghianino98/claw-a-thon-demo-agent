@@ -1,0 +1,5 @@
+ALTER TABLE skills ADD COLUMN command_alias TEXT;
+ALTER TABLE skills ADD COLUMN show_in_menu INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE workflows ADD COLUMN command_alias TEXT;
+ALTER TABLE workflows ADD COLUMN show_in_menu INTEGER NOT NULL DEFAULT 1;

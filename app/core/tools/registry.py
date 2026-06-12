@@ -16,6 +16,7 @@ from app.utils import safe_json
 
 
 ToolFn = Callable[[dict[str, Any], AgentContext], Awaitable[str]]
+QueryExpander = Callable[[str, AgentContext], Awaitable[str]]
 
 
 @dataclass
@@ -32,6 +33,7 @@ class ToolRegistry:
         self.kb = kb
         self.memory = memory
         self.skills = skills
+        self.query_expander: QueryExpander | None = None
         self._tools = self._build()
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -56,8 +58,9 @@ class ToolRegistry:
             return safe_json({"error": f"unknown tool: {name}"})
         try:
             result = await spec.handler(args or {}, ctx)
-            if len(result) > self.settings.tool_result_max_chars:
-                return result[: self.settings.tool_result_max_chars] + "\n[tool result truncated]"
+            limit = getattr(ctx, "tool_result_max_chars", None) or self.settings.tool_result_max_chars
+            if len(result) > limit:
+                return result[:limit] + "\n[tool result truncated]"
             return result
         except Exception as exc:
             return safe_json({"error": str(exc)[:300]})
@@ -174,7 +177,15 @@ class ToolRegistry:
         }
 
     async def _kb_search(self, args: dict[str, Any], ctx: AgentContext) -> str:
-        hits = self.kb.search(args["query"], args.get("product"), args.get("area"), int(args.get("top_k") or 5))
+        query = str(args["query"])
+        if self.query_expander and ctx.mode in {"qa", "deep", "workflow_step"}:
+            try:
+                expanded = (await self.query_expander(query, ctx)).strip()
+                if expanded and expanded.lower() not in query.lower():
+                    query = f"{query} {expanded[:300]}"
+            except Exception:
+                pass
+        hits = await self.kb.search_async(query, args.get("product"), args.get("area"), int(args.get("top_k") or 5))
         for hit in hits:
             if hit.path not in ctx.citations:
                 ctx.citations.append(hit.path)
@@ -198,7 +209,7 @@ class ToolRegistry:
         path = args["path"]
         if path not in ctx.citations:
             ctx.citations.append(path)
-        return self.kb.read(path, args.get("start_line"), args.get("end_line"))
+        return self.kb.read(path, args.get("start_line"), args.get("end_line"), getattr(ctx, "kb_read_max_chars", None))
 
     async def _kb_list(self, args: dict[str, Any], ctx: AgentContext) -> str:
         return self.kb.list_tree(args.get("path") or ".", int(args.get("depth") or 2))

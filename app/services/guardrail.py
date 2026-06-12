@@ -53,6 +53,9 @@ class GuardrailService:
         self.settings = settings
         self.patterns = self._load_patterns(settings.guardrail_config)
 
+    def reload(self) -> None:
+        self.patterns = self._load_patterns(self.settings.guardrail_config)
+
     def check(self, text: str) -> GuardrailMatch | None:
         prompt_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
         for category, patterns in self.patterns.items():

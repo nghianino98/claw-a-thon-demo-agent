@@ -24,13 +24,119 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     raw_message: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
+    model: str = ""
 
 
 class LLMClient:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, db: Any = None):
         self.settings = settings
+        self.db = db
+
+    def resolve_model(self, task_class: str, user_id: str | None = None) -> str:
+        routing = self._get_model_routing_config()
+        classes = routing.get("classes", {})
+
+        target = classes.get(task_class)
+        if not target:
+            if task_class == "lite":
+                target = self.settings.lite_model
+            else:
+                target = self.settings.llm_model
+
+        if task_class == "deep":
+            max_deep = int(routing.get("max_deep_calls_per_day") or 200)
+            if self.db:
+                from datetime import UTC, datetime
+                start_of_day = datetime.now(UTC).date().isoformat() + "T00:00:00Z"
+                try:
+                    with self.db.connect() as conn:
+                        row = conn.execute(
+                            "SELECT COUNT(*) AS count FROM llm_calls WHERE purpose='deep' AND created_at >= ?",
+                            (start_of_day,)
+                        ).fetchone()
+                    count = row["count"] if row else 0
+                    if count >= max_deep:
+                        fallback_model = classes.get("agent") or self.settings.llm_model
+                        try:
+                            with self.db.connect() as conn:
+                                conn.execute("PRAGMA busy_timeout=1000")
+                                conn.execute(
+                                    "INSERT INTO audit_log(actor, action, target, detail, created_at) VALUES (?,?,?,?,?)",
+                                    (
+                                        user_id or "system",
+                                        "deep_budget_exceeded",
+                                        "llm",
+                                        '{"count":' + str(count) + ',"max":' + str(max_deep) + '}',
+                                        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                                    )
+                                )
+                                conn.commit()
+                        except Exception:
+                            pass
+                        return fallback_model
+                except Exception:
+                    pass
+        return target
+
+    def _get_model_routing_config(self) -> dict[str, Any]:
+        if not self.db:
+            return {}
+        try:
+            with self.db.connect() as conn:
+                row = conn.execute("SELECT value FROM settings WHERE key=?", ("model_routing",)).fetchone()
+            if row and row["value"]:
+                import json
+                return json.loads(row["value"])
+        except Exception:
+            pass
+        return {}
 
     async def chat(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: int | None = None,
+        user_id: str | None = None,
+        task_class: str | None = None,
+    ) -> LLMResponse:
+        # Resolve target model
+        if model in {"lite", "agent", "code", "deep"}:
+            primary_model = self.resolve_model(model, user_id=user_id)
+        else:
+            primary_model = model
+
+        routing = self._get_model_routing_config()
+        fallback_chain = routing.get("fallback_chain") or []
+
+        candidates = [primary_model]
+        for m in fallback_chain:
+            if m and m not in candidates:
+                candidates.append(m)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                resp = await self._chat_single(
+                    model=candidate,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+                resp.model = candidate
+                return resp
+            except Exception as exc:
+                last_error = exc
+                if _is_non_fallback_error(exc):
+                    raise
+                continue
+        raise RuntimeError(f"All candidate models failed. Last error: {last_error}") from last_error
+
+    async def _chat_single(
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -136,3 +242,14 @@ def _response_error_detail(resp: httpx.Response, limit: int = 200) -> str:
     except Exception:
         return ""
     return " ".join(text.split())[:limit]
+
+
+def _is_non_fallback_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if "llm is not configured" in text or "not configured" in text:
+        return True
+    if any(marker in text for marker in ("401", "403", "404", "400", "422", "429")):
+        return True
+    if any(marker in text for marker in ("unauthorized", "forbidden", "invalid api key", "authentication")):
+        return True
+    return False
