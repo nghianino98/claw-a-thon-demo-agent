@@ -5,14 +5,14 @@ description: >
   Use this skill whenever someone asks about MMF data, muốn lấy data MMF từ Tableau, phân tích MMF, 
   xem metrics tài khoản tích lũy, hoặc chuẩn bị số liệu MMF cho báo cáo tháng. 
   Also trigger when someone mentions "main metrics MMF", "AUM MMF", "deposit MMF", "redemption MMF", 
-  "activation rate MMF", "retention MMF", "entrance traffic", "toggle prioritize", or any request to 
-  pull MMF numbers from Tableau. This skill covers which views to fetch, what each metric means, 
-  and how to structure the analysis for a monthly report.
+  "activation rate MMF", "retention MMF", "entrance traffic", "toggle prioritize", "NAU FAU RAU MMF",
+  "net flow MMF", "Amount.Fee", "G2 traffic", or any request to pull MMF numbers from Tableau.
+  This skill covers which views to fetch, what each metric means, and how to structure the analysis for a monthly report.
 ---
 
 # MMF Monthly Data Analysis Skill
 
-Bạn đang fetch data MMF từ Tableau để phân tích cho báo cáo tháng. MMF = "Tài Khoản Tích Lũy" (savings account product of ZaloPay). 
+Bạn đang fetch data MMF từ Tableau để phân tích cho báo cáo tháng. MMF = "Tài Khoản Tích Lũy" (savings account product of ZaloPay).
 
 **Prerequisite:** Tableau MCP server phải đang chạy (port 3927). Nếu tools `mcp__tableau-local__*` không available, nhắc user chạy `start-tableau-mcp.bat`. Nếu gặp lỗi **403**, session Tableau đã hết hạn — nhắc user reconnect rồi thử lại.
 
@@ -35,7 +35,15 @@ Bạn đang fetch data MMF từ Tableau để phân tích cho báo cáo tháng. 
 | Tài Khoản Tích Lũy (Product dashboard) | Product | `b142eb0d-6328-451e-8c17-7677b47d806b` |
 | Entrance Traffic | Product | `f09813ea-ae93-46bb-baa7-5e157d4962c0` |
 
-Nếu ID bị outdated, dùng `list-workbooks` với filter `projectName:eq:1. MMF` để tìm lại.
+### Known Custom View IDs
+| Custom View | Workbook | Period | ID |
+|-------------|----------|--------|----|
+| 052026 (Amount.Fee) | Business Performance | 4/1–6/11/2026 | `a17e90bd-ac10-4834-8cb8-cc620c975784` |
+| 052026 (Product dashboard) | Product | 4/1–6/11/2026 | `74deffdd-f24b-47eb-9cde-c566b2d41120` |
+| 052026-G2trafffic | Product / Entrance Traffic | 4/1–6/11/2026 | `4788fbcc-91df-416b-b689-1a4954a954c9` |
+| 052026-G1trafffic | Product / Entrance Traffic | 4/1–6/11/2026 | `20fc0bb6-9f56-4e9d-919b-d0bbe259c9d8` |
+
+Nếu ID bị outdated, dùng `list-custom-views(workbookId)` để tìm lại.
 
 ---
 
@@ -56,7 +64,7 @@ Custom view chỉ cần save 1 lần — lần sau fetch lại không cần user
 
 ### `get-custom-view-data` trả về 404
 
-Một số custom view không support CSV export — dùng `get-custom-view-image` thay thế để đọc số từ chart.
+**Amount.Fee view KHÔNG support CSV export** — luôn dùng `get-custom-view-image` với `width=1400, height=900`. Đây là confirmed behavior, không cần thử lại CSV. Các view khác (Entrance Traffic, Retention MTD) vẫn support CSV bình thường.
 
 ### VizQL Data Service disabled
 
@@ -83,32 +91,66 @@ Khi timeframe=Daily, TOTAL USER = tổng cộng dồn daily active users — **b
 - Cần custom view có timeframe=Monthly
 - TOTAL USER khi đó mới là monthly unique users
 
+### Cách lấy NAU / FAU / RAU breakdown per month
+
+Retention MTD view hỗ trợ filter `User Type` (dimension filter — hoạt động với `viewFilters`). Chạy 3 fetches riêng:
+
+```
+get-view-data(viewId="bf8385c2-ce92-4162-ac43-3708f18e72ed", viewFilters={"User Type": "NAU"})
+get-view-data(viewId="bf8385c2-ce92-4162-ac43-3708f18e72ed", viewFilters={"User Type": "FAU"})
+get-view-data(viewId="bf8385c2-ce92-4162-ac43-3708f18e72ed", viewFilters={"User Type": "RAU"})
+```
+
+Đọc `mtd_users` tại ngày cuối tháng của từng CSV (Apr=Day 30, May=Day 31, MTD=ngày cuối cùng có data).
+
+**Lưu ý:** Tổng NAU+FAU+RAU có thể lớn hơn MAU tổng ~5-7% — bình thường. Dùng MAU tổng (no filter) làm official; N/F/R dùng để phân tích cơ cấu.
+
 ---
 
-## Step 4: Nguồn data cho từng metric — QUY TẮC BẮT BUỘC
+## Step 4: Nguồn data cho từng metric
 
-### Phân tách rõ ràng: Amount.Fee vs Main Metrics
+| Metric | Nguồn chính | Ghi chú |
+|--------|-------------|---------|
+| **AUM** (cuối tháng) | **Amount.Fee** — image, đọc bar cuối tháng | Stock metric — KHÔNG extrapolate |
+| **Deposit amount** (tháng) | **Amount.Fee** — image, đọc bar `#deposit.amount` | Cross-check với KPI period total |
+| **Redemption amount** (tháng) | **Amount.Fee** — image, đọc bar `#redemption.amount` | Cross-check với KPI period total |
+| **Net flow** (tháng) | **Amount.Fee** — image, đọc bar `Net Amount` | Trực tiếp nhất, label rõ trên chart |
+| **Transaction type breakdown** | **Main Metrics** | Tách theo loại giao dịch |
+| **Total Volume gross** (Deposit+Withdraw) | **Main Metrics** | Khác với Amount.Fee deposit/redemption |
+| **MAU** (tổng) | Retention MTD view, không filter | |
+| **NAU / FAU / RAU** (per month) | Retention MTD view, filter `User Type` | |
+| **NFAU** | Main Metrics (TOTAL NFAU field) | |
+| **G2 traffic source breakdown** | Custom view `052026-G2trafffic` | FAU drill-down; NAU không trace được qua view này |
 
-| Metric | Lấy từ đâu | KHÔNG lấy từ đâu |
-|--------|-----------|-----------------|
-| **AUM** (cuối tháng) | **Amount.Fee** — đọc giá trị tại ngày cuối kỳ | ~~Main Metrics~~ |
-| **Deposit volume** (tổng tháng) | **Main Metrics** | ~~Amount.Fee~~ |
-| **Redemption volume** (tổng tháng) | **Main Metrics** | ~~Amount.Fee~~ |
-| **MAU** | Retention MTD view | ~~Main Metrics Daily~~ |
-| **NFAU** | Main Metrics (TOTAL NFAU field) | — |
-| **Transaction type breakdown** | Main Metrics | — |
+### Tại sao Amount.Fee và Main Metrics cho số deposit khác nhau?
 
-**Lý do phân tách:** Amount.Fee và Main Metrics đo deposit/redemption theo cách khác nhau (different transaction scope), dẫn đến số không nhất quán nếu trộn lẫn. Dùng Main Metrics cho tất cả volume metrics đảm bảo consistency. Amount.Fee chỉ dùng để đọc AUM vì đây là view chuyên về fund balance.
+- **Amount.Fee deposit** = tiền thực sự vào quỹ MMF, đối chiếu với AUM balance
+- **Main Metrics DEPOSIT AMOUNT** = tổng gross volume tất cả deposit transaction types
 
-### Đọc AUM từ Amount.Fee
+Để phân tích AUM và net flow → dùng Amount.Fee. Để phân tích loại giao dịch nào phổ biến → dùng Main Metrics.
 
-AUM là **stock metric** (số dư tại 1 thời điểm), không phải flow. Lấy giá trị tại ngày cuối kỳ:
-- Tháng hoàn chỉnh: đọc AUM ngày cuối tháng (e.g., Apr 30, May 31)
-- Tháng MTD: đọc AUM tại ngày cut-off mới nhất
+### Đọc Amount.Fee image — Hướng dẫn
 
-### Đọc Deposit/Redemption từ Main Metrics
+Fetch bằng `get-custom-view-image(customViewId, width=1400, height=900)`. View có Monthly timeframe với các sections:
 
-Main Metrics DEPOSIT AMOUNT và WITHDRAW AMOUNT bao gồm tất cả transaction types liên quan. Cộng tổng daily values cho cả tháng để ra monthly total.
+**AUM chart** — giá trị cuối tháng (stock metric). Labels dạng "3,405.8" tỷ VND.
+
+**`#deposit.amount` chart** (unit: tỷ VND) — tổng deposit tháng.
+
+**`#redemption.amount` chart** (unit: tỷ VND) — tổng redemption tháng.
+
+**`Net Amount` chart** (unit: tỷ VND) — **DỄ ĐỌC NHẤT.** Formula hiển thị: `net amount = deposit - withdraw`. Màu xanh = dương, đỏ = âm.
+
+**`#earning.amount` chart** (unit: triệu VND) — lãi suất trả cho user.
+
+**Cross-check:** Deposit - Redemption ≈ Net Amount. AUM delta = Net flow + Earning amount.
+
+**Confirmed values (custom view 052026, 4/1–6/11/2026):**
+- T4 (Apr 30): AUM **3,405.8B** | deposit 4,402.7B | redemption 4,366.4B | net **+36.3B**
+- T5 (May 31): AUM **3,396.6B** | deposit 4,499.2B | redemption 4,520.1B | net **-21.0B**
+- T6 MTD (Jun 11): AUM **3,542.0B** | net **+141.2B**
+
+> ⚠️ AUM T4 = **3,405.8B** — visual estimate cũ ~3,480B là sai (chênh 74B, MoM thực = -0.27% không phải -2.4%)
 
 ---
 
@@ -116,30 +158,18 @@ Main Metrics DEPOSIT AMOUNT và WITHDRAW AMOUNT bao gồm tất cả transaction
 
 ### Tháng đã kết thúc — KHÔNG ước tính
 
-Nếu default view không cover đủ tháng (e.g., Amount.Fee default bắt đầu từ 13/5), **không** extrapolate hay estimate. Thay vào đó:
-1. Fetch custom view nếu user đã save (e.g., "052026" cho 4/1–6/11)
+Nếu default view không cover đủ tháng, **không** extrapolate hay estimate. Thay vào đó:
+1. Fetch custom view nếu user đã save
 2. Nếu không có custom view → báo rõ: "Data cho [tháng X] chỉ có từ [ngày Y], không đủ để report. Cần save custom view trên Tableau với date range [tháng X đầy đủ]."
 3. Hiện thực chỉ những số confirmed, đánh dấu rõ khoảng thời gian có data.
 
 ### Tháng chưa kết thúc (MTD) — thêm cột Estimated Full Month
 
-Với tháng đang chạy, ngoài cột MTD actual, thêm cột **"Ước tính cuối tháng"** dựa trên run-rate:
-
 ```
 Run-rate estimate = (MTD actual / số ngày đã qua) × tổng số ngày trong tháng
 ```
 
-Điều chỉnh nếu có trend rõ ràng từ các tháng trước (e.g., nếu MAU thường tăng 1–2% MoM, áp dụng vào estimate thay vì chỉ dùng thuần run-rate). Luôn ghi chú công thức và số ngày đã dùng.
-
-**Ví dụ:**
-
-| Metric | T4 | T5 | T6 MTD D11 | T6 Est. cuối tháng |
-|--------|:--:|:--:|:----------:|:-----------------:|
-| MAU | 1,030,940 | 1,048,128 | 719,279 | ~1,095,000 ¹ |
-| Deposit (tỷ) | 4,327 | 4,xxx | 1,959 | ~5,343 ² |
-
-¹ Dựa MoM growth +1.67% T4→T5: ước tính T6 ~1,048,128 × 1.017 ≈ 1,066,000. Run-rate thuần: 719,279/11×30 ≈ 1,962,579 — chọn conservative estimate.
-² 1,959 / 11 × 30 = 5,343B
+Điều chỉnh nếu có MoM trend rõ ràng từ các tháng trước. Luôn ghi chú công thức và số ngày đã dùng.
 
 ---
 
@@ -149,16 +179,16 @@ Run-rate estimate = (MTD actual / số ngày đã qua) × tổng số ngày tron
 
 | View | Lấy gì | Lưu ý |
 |------|--------|-------|
-| **MMF - MTD - Retention** ★★★ | MAU, daily users | CSV đầy đủ, không cần custom view cho date range |
-| **Amount.Fee** ★★★ | **AUM cuối tháng** (chỉ metric này) | Custom view nếu cần date range ngoài default |
-| **Main Metrics** ★★★ | **Deposit/redemption volume**, NFAU, transaction breakdown | Custom view nếu cần full month data |
+| **MMF - MTD - Retention** ★★★ | MAU tổng + NAU/FAU/RAU | No filter = MAU tổng; filter `User Type` = N/F/R |
+| **Amount.Fee** ★★★ | AUM, deposit, redemption, net flow, earning | **Image only** (CSV 404); width=1400, height=900; dùng custom view nếu cần date range khác |
+| **Main Metrics** ★★ | NFAU, transaction type breakdown | Dùng khi cần breakdown by transaction type |
 
 ### B. Product workbook
 
 | View | Lấy gì | Lưu ý |
 |------|--------|-------|
-| **Tài Khoản Tích Lũy** ★★★ | Registration, activation rate, merchant distribution | Custom view nếu cần date range khác |
-| **Entrance Traffic** ★★★ | Signup sources (G1/G2), entry point breakdown | Custom view G1traffic/G2traffic nếu cần full period |
+| **Tài Khoản Tích Lũy** ★★★ | Registration, activation rate | Custom view nếu cần date range khác |
+| **Entrance Traffic** ★★★ | G2 traffic source breakdown | Dùng custom view `052026-G2trafffic` để có data đủ kỳ |
 | Nuôi heo chắt chill | — | Skip, outdated |
 
 ---
@@ -193,14 +223,13 @@ Run-rate estimate = (MTD actual / số ngày đã qua) × tổng số ngày tron
 
 ## Step 8: Key segments & dimensions
 
-### User segments (MMF)
 | Segment | Định nghĩa |
 |---------|-----------|
 | **NAU** (New App User) | User mới của ZaloPay mà **dịch vụ đầu tiên** họ dùng là MMF |
 | **FAU** (First-time Active User) | User **không mới** với ZaloPay nhưng lần đầu tiên dùng MMF |
 | **RAU** (Returning Active User) | User cũ của MMF (đã từng dùng MMF trước đó, quay lại) |
 | **G1** | User cũ của MMF |
-| **G2** | User mới của MMF |
+| **G2** | User mới của MMF (= NAU + FAU) |
 
 - **Merchant Distribution**: User dùng MMF `pay` cho merchant nào (IRIS MEDIA = nạp điện thoại)
 
@@ -211,36 +240,62 @@ Run-rate estimate = (MTD actual / số ngày đã qua) × tổng số ngày tron
 | # | Nội dung | Nguồn data |
 |---|----------|-----------|
 | 9.1 | MAU, daily avg | Retention MTD view |
-| 9.2 | **AUM cuối tháng** | **Amount.Fee** (đọc giá trị ngày cuối kỳ) |
-| 9.3 | **Deposit/redemption volume & breakdown** | **Main Metrics** |
-| 9.4 | NFAU | Main Metrics (TOTAL NFAU field) |
-| 9.5 | Registration, activation rate | Product dashboard |
-| 9.6 | Traffic sources, G1/G2 | Entrance Traffic |
+| 9.2 | AUM cuối tháng | Amount.Fee image |
+| 9.3 | Deposit, redemption, net flow per month | Amount.Fee image (Net Amount chart) |
+| 9.4 | Transaction type breakdown | Main Metrics |
+| 9.5 | NFAU | Main Metrics (TOTAL NFAU field) |
+| 9.6 | Registration, activation rate | Product dashboard |
+| 9.7 | G2 traffic source breakdown | Custom view `052026-G2trafffic` |
+
+### Khi FAU tăng — drill down G2 traffic source qua custom view
+
+FAU = user ZaloPay cũ lần đầu dùng MMF → driver của FAU nằm ở **traffic source nào đang đưa user ZaloPay vào MMF**. Khi FAU tăng MoM, luôn xác định source nào tăng.
+
+**Cách fetch:**
+
+```
+get-custom-view-data(customViewId="4788fbcc-91df-416b-b689-1a4954a954c9")
+```
+
+CSV trả về các cột: `Break by` (entry point/source), `Period Type`, `Min. trans_date`, `total_signup_fe` (số signup vào MMF). So sánh `total_signup_fe` theo source giữa các period để xác định MoM delta.
+
+**Cách đọc kết quả:**
+- Group theo `Break by` → cộng tổng `total_signup_fe` cho từng period
+- Source nào tăng nhiều nhất → driver của FAU tăng
+- Chú ý **deposit conversion rate** (nếu có trong view) — source có conversion cao là source chất lượng, đáng ưu tiên
+
+**Confirmed benchmark từ kỳ 4/1–6/11/2026:**
+- `home` (~35K signup/tuần) — source lớn nhất nhưng đang giảm nhẹ (-7.1% MoM)
+- `crmnoti_remindcollectcashback` (~14K/tuần) — giảm -8.3% MoM
+- `fs_hub` (~14K/tuần) — **source duy nhất tăng (+6.1%)**, deposit conversion cao nhất (16.9%) → source chất lượng nhất
+- `unlink_tt40` (606→774/tuần) — source mới nổi liên quan TT40 compliance
+- `notification_nba_x2_coin` — xuất hiện đột biến từ campaign ngắn hạn (1,784 signups trong 4 ngày T6)
+
+**Lưu ý quan trọng về NAU:**
+NAU = user **mới ZaloPay** (chưa có tài khoản ZaloPay trước đó). Entrance Traffic/G2 traffic view chỉ track user ZaloPay có sẵn vào MMF lần đầu (= FAU). NAU tăng không trace được qua view này — cần xác nhận với growth/acquisition team ở ZaloPay level.
+
+**Khi cần kỳ báo cáo khác:** Yêu cầu user save custom view mới trên Entrance Traffic view với date range phù hợp, sau đó dùng `list-custom-views(workbookId="6dc7061d-a555-4927-827c-4b3cb26d5cca")` để lấy ID mới.
 
 ---
 
 ## Step 10: Output format
 
-Luôn có cột "Ước tính cuối tháng" cho tháng chưa kết thúc. Đánh dấu nguồn data trong header:
-
 ```
-## MMF – So sánh tháng
-
 | Metric | T(n-2) | T(n-1) | T(n) MTD Dxx | T(n) Est. |
 |--------|--------|--------|:------------:|:---------:|
 | MAU | | | | |
 | Daily avg users | | | | |
 | AUM cuối kỳ (tỷ VND) [Amount.Fee] | | | | — |
-| Deposit volume (tỷ VND) [Main Metrics] | | | | |
-| Redemption volume (tỷ VND) [Main Metrics] | | | | |
-| Net flow (tỷ VND) | | | | |
+| Deposit amount (tỷ VND) [Amount.Fee] | | | | |
+| Redemption amount (tỷ VND) [Amount.Fee] | | | | |
+| Net flow (tỷ VND) [Amount.Fee] | | | | |
 | NFAU [Main Metrics] | | | | |
 | Activation rate | | | | |
-
-Ghi chú ước tính: run-rate = MTD / Dxx × tổng ngày tháng [± MoM trend adjustment]
 ```
 
-AUM không có cột estimate vì là stock metric — không extrapolate AUM.
+- AUM không có cột estimate (stock metric — không extrapolate)
+- MAU estimate: dùng MoM trend, không dùng run-rate
+- Net flow dương = net inflow; âm = net outflow
 
 ---
 
@@ -251,7 +306,11 @@ AUM không có cột estimate vì là stock metric — không extrapolate AUM.
 | 403 error | Tableau session hết hạn → nhắc user reconnect |
 | Timeout | Fetch image trước, sau đó fetch CSV với filters hẹp hơn |
 | Date range bị lock | Dùng custom view workflow (Step 2) |
-| `get-custom-view-data` 404 | Dùng `get-custom-view-image` thay thế |
+| `get-custom-view-data` 404 trên Amount.Fee | Expected — dùng `get-custom-view-image` width=1400 height=900 |
 | query-datasource lỗi | VizQL disabled trên server này — không dùng được |
 | TOTAL USER bị inflate | Kiểm tra timeframe — nếu Daily thì không phải MAU, dùng Retention MTD view |
 | Thiếu data tháng đã kết thúc | Không estimate — báo user cần save custom view với đúng date range |
+| Net flow từ Amount.Fee ≠ AUM delta | Bình thường — AUM delta = net flow + earning amount (lãi suất) |
+| N/F/R sum ≠ total MAU | Bình thường — dùng total MAU (no filter) làm official |
+| Hidden sheets trong workbook | Tableau API không expose hidden sheets — nhờ owner publish sheet thành view riêng |
+| G2 traffic custom view hết hạn | Dùng `list-custom-views` để tìm ID mới hoặc nhờ user save custom view mới |
