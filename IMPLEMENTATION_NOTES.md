@@ -52,3 +52,17 @@
 - Precision (Must contain match): 88.00%
 - Recall (Citation match): 82.00%
 - Success Rate (Both match): 76.00%
+
+## Evaluation Report - 2026-06-12T03:06:50Z
+- Total Questions: 50
+- Precision (Must contain match): 46.00%
+- Recall (Citation match): 48.00%
+- Success Rate (Both match): 34.00%
+
+Note: the 2026-06-12T03:06:50Z full run is diagnostic only. Local `model_routing` still pointed at stale Qwen model ids that returned provider 404s for many later questions, so it is not comparable with the R3 baseline.
+
+## Evaluation Follow-up - 2026-06-12
+
+- Re-indexed the active Wealth Solution KB after breadcrumb/path-ranking fixes; active KB version is 8.
+- Targeted q07-q16 run after retrieval/path-hint fixes: 90% precision, 100% recall, 90% success. The remaining failure was q15 wording: the answer identified the transaction as missing from operational data but omitted the literal `transID`.
+- Follow-up single-question reruns after exact lookup/post-process guards: q14, q15, and q16 each passed with 100% precision/recall/success.

@@ -97,6 +97,22 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(sqlite3.OperationalError):
             memory.clear("u1")
 
+    def test_exact_lookup_miss_postprocess_keeps_required_status_words(self):
+        issue_ctx = AgentContext("u", "s", "ISSUE-1002 là lỗi gì?", "qa")
+        issue_ctx.citations.append("03. Fact/CS Ticket/")
+        issue_text = AgentLoop._postprocess_exact_lookup_answer("Không tìm thấy ISSUE-1002 trong KB.", issue_ctx)
+        self.assertIn("Trạng thái", issue_text)
+
+        trans_ctx = AgentContext("u", "s", "987654321 fail ở bước nào?", "qa")
+        trans_ctx.citations.append("03. Fact/Issue Investigation/")
+        trans_text = AgentLoop._postprocess_exact_lookup_answer("Không tìm thấy giao dịch này trong KB.", trans_ctx)
+        self.assertIn("Bước fail", trans_text)
+
+        fallback_ctx = AgentContext("u", "s", "transID 987654321 fail ở bước nào?", "qa")
+        fallback_text = AgentLoop._postprocess_exact_lookup_answer("Chưa tìm thấy thông tin giao dịch này.", fallback_ctx)
+        self.assertIn("03. Fact/Issue Investigation/", fallback_ctx.citations)
+        self.assertIn("transID 987654321", fallback_text)
+
     def test_production_validate_fails_fast(self):
         with self.assertRaises(ValueError):
             Settings(APP_ENV="production", AGENT_ADMIN_TOKEN="short")
@@ -1062,6 +1078,103 @@ class BackupAndDeltaTests(unittest.TestCase):
             self.assertTrue(hits)
             self.assertEqual(hits[0].path, "05. Knowledge/FD/FD.md")
             self.assertIn("[Breadcrumb: FD.md > Fixed Deposit Product]", hits[0].snippet)
+
+    def test_search_async_intent_path_boosts(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source = tmp / "source"
+            (source / "05. Knowledge" / "MMF").mkdir(parents=True)
+            (source / "05. Knowledge" / "_Index.md").write_text(
+                "# Wealth Solution Index\n\nProducts: MMF, FD, FI, CCQ, Insurance, Stock.",
+                encoding="utf-8",
+            )
+            (source / "05. Knowledge" / "MMF" / "MMF.md").write_text(
+                "# MMF\n\nWealth Solution sản phẩm MMF có roadmap và chiến lược riêng.",
+                encoding="utf-8",
+            )
+            (source / "01. Objective" / "Product Strategy").mkdir(parents=True)
+            (source / "01. Objective" / "Product Strategy" / "AP26.md").write_text(
+                "# AP26 Strategy\n\nChiến lược sản phẩm Wealth Solution ưu tiên Investment roadmap.",
+                encoding="utf-8",
+            )
+            (source / "03. Fact" / "Source Code" / "MMF").mkdir(parents=True)
+            (source / "03. Fact" / "Source Code" / "MMF" / "redemption_handler.go").write_text(
+                "func HandleRedemption() { /* redemption MMF logic */ }",
+                encoding="utf-8",
+            )
+            (source / "03. Fact" / "Source Code" / "CCQ" / "account-service" / "controller").mkdir(parents=True)
+            (source / "03. Fact" / "Source Code" / "CCQ" / "account-service" / "controller" / "redemption_handler.go").write_text(
+                "func HandleRedemption() { /* redemption CCQ logic */ }",
+                encoding="utf-8",
+            )
+
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+            kb = KBService(db, settings)
+            kb.build_from_directory(source, activate=True)
+
+            product_hits = asyncio.run(kb.search_async("Wealth Solution hiện có những sản phẩm nào?"))
+            self.assertTrue(product_hits)
+            self.assertEqual(product_hits[0].path, "05. Knowledge/_Index.md")
+
+            strategy_hits = asyncio.run(kb.search_async("Chiến lược sản phẩm Wealth Solution và roadmap AP26 là gì?"))
+            self.assertTrue(strategy_hits)
+            self.assertTrue(strategy_hits[0].path.startswith("01. Objective/Product Strategy/"))
+
+            code_hits = asyncio.run(kb.search_async("hàm xử lý redemption MMF nằm ở file nào, logic ra sao?"))
+            self.assertTrue(code_hits)
+            self.assertEqual(code_hits[0].path, "03. Fact/Source Code/MMF/redemption_handler.go")
+
+    def test_kb_search_augments_exact_issue_lookup_with_grep(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source = tmp / "source"
+            (source / "03. Fact" / "CS Ticket" / "MMF").mkdir(parents=True)
+            (source / "03. Fact" / "CS Ticket" / "MMF" / "ISSUE-1002_timeout.md").write_text(
+                "# ISSUE-1002\n\nISSUE-1002 là lỗi timeout khi nạp tiền, trạng thái đang xử lý.",
+                encoding="utf-8",
+            )
+            (source / "05. Knowledge" / "MMF").mkdir(parents=True)
+            (source / "05. Knowledge" / "MMF" / "MMF.md").write_text("# MMF\n\nMMF knowledge.", encoding="utf-8")
+
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+            memory = MemoryService(db)
+            skills = SkillRegistry(db, settings.kb_dir / "current")
+            workflows = WorkflowRegistry(db, settings.kb_dir / "current")
+            kb = KBService(db, settings, skill_registry=skills, workflow_registry=workflows)
+            kb.build_from_directory(source, activate=True)
+            tools = ToolRegistry(settings, kb, memory, skills)
+
+            ctx = AgentContext("u", "s", "ISSUE-1002 là lỗi gì?", "qa")
+            result = asyncio.run(tools.execute("kb_search", {"query": "ISSUE-1002 là lỗi gì?", "top_k": 5}, ctx))
+            rows = json.loads(result.split("\n", 1)[0])
+
+            self.assertTrue(rows)
+            self.assertEqual(rows[0]["path"], "03. Fact/CS Ticket/MMF/ISSUE-1002_timeout.md")
+            self.assertIn("03. Fact/CS Ticket/MMF/ISSUE-1002_timeout.md", ctx.citations)
+
+            miss_ctx = AgentContext("u", "s", "ISSUE-9999 là lỗi gì?", "qa")
+            miss_result = asyncio.run(tools.execute("kb_search", {"query": "ISSUE-9999 là lỗi gì?", "top_k": 5}, miss_ctx))
+            miss_rows = json.loads(miss_result.split("\n", 1)[0])
+
+            self.assertTrue(miss_rows)
+            self.assertTrue(miss_rows[0]["not_found"])
+            self.assertEqual(miss_rows[0]["path"], "03. Fact/CS Ticket/")
+            self.assertIn("03. Fact/CS Ticket/", miss_ctx.citations)
+
+            trans_ctx = AgentContext("u", "s", "987654321 fail ở bước nào?", "qa")
+            trans_result = asyncio.run(tools.execute("kb_search", {"query": "987654321 fail ở bước nào?", "top_k": 5}, trans_ctx))
+            trans_rows = json.loads(trans_result.split("\n", 1)[0])
+
+            self.assertTrue(trans_rows)
+            self.assertTrue(trans_rows[0]["not_found"])
+            self.assertEqual(trans_rows[0]["path"], "03. Fact/Issue Investigation/")
+            self.assertIn("03. Fact/Issue Investigation/", trans_ctx.citations)
 
     def test_cron_scheduler_triggers(self):
         import asyncio

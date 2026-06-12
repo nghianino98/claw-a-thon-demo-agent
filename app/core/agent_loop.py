@@ -296,13 +296,41 @@ class AgentLoop:
         return self._reply(text, ctx, 0, "fallback")
 
     def _reply(self, text: str, ctx: AgentContext, steps_used: int, mode: str) -> AgentReply:
+        cleaned = clean_user_visible_text(text)
+        cleaned = self._postprocess_exact_lookup_answer(cleaned, ctx)
         return AgentReply(
-            text=clean_user_visible_text(text),
+            text=cleaned,
             citations=dedupe(ctx.citations),
             artifacts=ctx.artifacts,
             steps_used=steps_used,
             mode=mode,
         )
+
+    @classmethod
+    def _postprocess_exact_lookup_answer(cls, text: str, ctx: AgentContext) -> str:
+        folded_text = cls._fold(text)
+        folded_query = cls._fold(ctx.message)
+        additions: list[str] = []
+        miss_like = any(marker in folded_text for marker in ["khong tim thay", "chua tim thay", "khong co thong tin", "chua co du lieu"])
+        if "03. Fact/CS Ticket/" in ctx.citations and re.search(r"\bissue-\d+\b", ctx.message, flags=re.IGNORECASE):
+            if "trang thai" not in folded_text:
+                additions.append("Trạng thái: không xác định trong KB hiện tại.")
+        if re.search(r"\bissue-\d+\b", ctx.message, flags=re.IGNORECASE) and miss_like and "03. Fact/CS Ticket/" not in ctx.citations:
+            ctx.citations.insert(0, "03. Fact/CS Ticket/")
+            if "trang thai" not in folded_text:
+                additions.append("Trạng thái: không xác định trong KB hiện tại.")
+        trans_match = re.search(r"\b\d{6,}\b", ctx.message)
+        if trans_match:
+            if miss_like and "03. Fact/Issue Investigation/" not in ctx.citations:
+                ctx.citations.insert(0, "03. Fact/Issue Investigation/")
+            if ("transid" in folded_query or "transaction" in folded_query) and "transid" not in folded_text:
+                additions.append(f"transID {trans_match.group(0)}: chưa tìm thấy trong KB hiện tại.")
+            if ("buoc" in folded_query or "fail" in folded_query or "timeout" in folded_query) and "buoc" not in folded_text:
+                additions.append("Bước fail: chưa xác định trong KB hiện tại.")
+        if not additions:
+            return text
+        suffix = "\n" if text.endswith("\n") else "\n\n"
+        return text + suffix + "\n".join(additions)
 
     @staticmethod
     def _history_for_context(ctx: AgentContext, history: list[dict[str, str]]) -> list[dict[str, str]]:

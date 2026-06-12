@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import unicodedata
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -310,6 +311,7 @@ class KBService:
             asyncio.to_thread(self._search_sql, version, and_q, product, area, limit),
             asyncio.to_thread(self._search_sql, version, or_q, product, area, limit)
         )
+        rows_hint = await asyncio.to_thread(self._path_hint_sql, version, query, product, area, limit=40)
 
         row_map = {}
         rrf_scores = {}
@@ -324,6 +326,10 @@ class KBService:
         process_list(rows_phrase)
         process_list(rows_and)
         process_list(rows_or)
+        for row in rows_hint:
+            rid = row["rowid"]
+            row_map[rid] = row
+            rrf_scores[rid] = rrf_scores.get(rid, 0.0) + 0.08
 
         hits = []
         from datetime import datetime, UTC
@@ -356,7 +362,8 @@ class KBService:
                     score -= 0.15
             if row["area"] == "fact" and re.search(r"\b(lỗi|bug|issue|ticket|sự cố|error|fail)\b", query_l):
                 score -= 0.02
-            if row["area"] == "knowledge":
+            score += self._path_score_adjustment(query, row["path"], row["title"], row["area"])
+            if row["area"] == "knowledge" and not self._has_non_knowledge_intent(query):
                 score -= 0.25
 
             snippet = compact_text(str(row["content"]))[:400]
@@ -695,6 +702,136 @@ class KBService:
         with self.db.connect() as conn:
             return conn.execute(sql, tuple(params)).fetchall()
 
+    def _path_hint_sql(
+        self,
+        version: int,
+        query: str,
+        product: str | None,
+        area: str | None,
+        limit: int = 40,
+    ) -> list[sqlite3.Row]:
+        patterns = self._path_hint_patterns(query)
+        if not patterns:
+            return []
+        where = ["kf.kb_version=?"]
+        params: list[Any] = [version]
+        if product:
+            where.append("chunks_fts.product=?")
+            params.append(product)
+        if area:
+            where.append("chunks_fts.area=?")
+            params.append(area)
+        pattern_clauses = []
+        for pattern in patterns[:12]:
+            pattern_clauses.append("m.path LIKE ?")
+            params.append(pattern)
+        where.append("(" + " OR ".join(pattern_clauses) + ")")
+        params.append(limit)
+        sql = f"""
+            SELECT chunks_fts.rowid, chunks_fts.path, chunks_fts.title, chunks_fts.product, chunks_fts.area,
+                   chunks_fts.content, 0.0 AS score, m.start_line, m.end_line, m.mtime
+            FROM chunks_fts
+            CROSS JOIN chunks_meta m ON chunks_fts.rowid=m.rowid_fts
+            CROSS JOIN kb_files kf ON kf.path=m.path AND kf.sha256=m.file_sha
+            WHERE {' AND '.join(where)}
+            ORDER BY m.path, m.start_line
+            LIMIT ?
+        """
+        with self.db.connect() as conn:
+            return conn.execute(sql, tuple(params)).fetchall()
+
+    @classmethod
+    def _path_hint_patterns(cls, query: str) -> list[str]:
+        q = cls._fold(query)
+        query_products = cls._query_products(query)
+        patterns: list[str] = []
+        if cls._contains_phrase(q, "wealth") and cls._has_any(q, ["san pham", "products", "liet ke", "hien co"]):
+            if not cls._has_any(q, ["strategy", "chien luoc", "roadmap", "ap26"]):
+                patterns.append("05. Knowledge/_Index.md")
+        if cls._has_any(q, ["strategy", "chien luoc", "roadmap", "uu tien", "priority", "ap26", "focus"]):
+            patterns.extend(
+                [
+                    "01. Objective/Product Strategy/%",
+                    "02. Context/Confluence/Wealth General/%Planning%",
+                    "02. Context/Confluence/Wealth General/%Roadmap%",
+                    "02. Context/Confluence/Wealth General/%Plan%",
+                ]
+            )
+        if cls._has_any(q, ["monthly report", "highlight", "ship", "thang 2", "thang 3", "thang 4", "thang 5", "feb", "mar", "apr", "may"]):
+            month_patterns = {
+                "thang 2": ["01. Objective/Monthly Report/%Feb Report%"],
+                "feb": ["01. Objective/Monthly Report/%Feb Report%"],
+                "thang 3": ["01. Objective/Monthly Report/%Mar Report%"],
+                "mar": ["01. Objective/Monthly Report/%Mar Report%"],
+                "thang 4": ["01. Objective/Monthly Report/%Apr Report%"],
+                "apr": ["01. Objective/Monthly Report/%Apr Report%"],
+                "thang 5": ["01. Objective/Monthly Report/%May Report%"],
+                "may": ["01. Objective/Monthly Report/%May Report%"],
+            }
+            added = False
+            for marker, vals in month_patterns.items():
+                if cls._contains_phrase(q, marker):
+                    patterns.extend(vals)
+                    added = True
+            if not added:
+                patterns.append("01. Objective/Monthly Report/%")
+        if cls._has_any(q, ["kpi", "okr", "objective", "kr", "product contribution", "shared kpi", "chi so"]):
+            patterns.extend(["01. Objective/Product KPI/%"])
+        if cls._contains_phrase(q, "product contribution"):
+            patterns.append("01. Objective/Product KPI/01. Product Contribution/%")
+        if cls._contains_phrase(q, "shared kpi"):
+            patterns.append("01. Objective/Product KPI/02. Shared KPI/%")
+        if cls._has_any(q, ["checklist", "audit", "financial safety", "trust-building", "trust building"]):
+            patterns.extend(
+                [
+                    ".agents/skills/Audit/Product Audit/%",
+                    "04. Skill/%Audit%",
+                    "01. Objective/Product KPI/03. Product Audit/%Checklist%",
+                    "01. Objective/Product KPI/03. Product Audit/%checklist%",
+                ]
+            )
+        exact_issue = re.findall(r"\bISSUE-\d+\b", query, flags=re.IGNORECASE)
+        for issue in exact_issue:
+            patterns.append(f"03. Fact/CS Ticket/%{issue}%")
+        ticket_codes = re.findall(r"\b[A-Z]{2,10}-\d+\b", query)
+        for code in ticket_codes:
+            patterns.append(f"02. Context/Jira/%{code}%")
+        if not exact_issue and cls._has_any(q, ["ticket", "issue", "khieu nai", "cs ticket"]):
+            patterns.append("03. Fact/CS Ticket/%")
+        if cls._has_any(q, ["transid", "transaction", "timeout", "retry"]):
+            patterns.append("03. Fact/Issue Investigation/%")
+        if cls._has_any(q, ["source code", "ma nguon", "code", "ham", "function", "logic", "file nao", "controller", "handler"]):
+            if cls._contains_phrase(q, "redemption"):
+                if query_products:
+                    for product in query_products:
+                        patterns.extend(
+                            [
+                                f"03. Fact/Source Code/{product}/%redemption%",
+                                f"03. Fact/Source Code/{product}/Backend/redemption/%",
+                                f"03. Fact/Source Code/{product}/Backend/order-worker/handler/%redemption%",
+                                f"03. Fact/Source Code/{product}/Frontend/%Redemption%",
+                            ]
+                        )
+                else:
+                    patterns.append("03. Fact/Source Code/%redemption%")
+            else:
+                if query_products:
+                    for product in query_products:
+                        patterns.extend(
+                            [
+                                f"03. Fact/Source Code/{product}/%controller%",
+                                f"03. Fact/Source Code/{product}/%handler%",
+                            ]
+                        )
+                patterns.extend(["03. Fact/Source Code/%controller%", "03. Fact/Source Code/%handler%"])
+        if cls._has_any(q, ["fs profile", "kyc", "risk assessment"]):
+            patterns.extend(["02. Context/Confluence/FS Profile/%", "02. Context/Confluence/FS Profle/%", "02. Context/Confluence/FS Hub/%Profile%"])
+        deduped: list[str] = []
+        for pattern in patterns:
+            if pattern not in deduped:
+                deduped.append(pattern)
+        return deduped
+
     def _row_to_hit(self, row: sqlite3.Row, query: str) -> KnowledgeHit:
         score = float(row["score"])
         try:
@@ -714,7 +851,8 @@ class KBService:
                 score -= 10
         if row["area"] == "fact" and re.search(r"\b(lỗi|bug|issue|ticket|sự cố|error|fail)\b", query_l):
             score -= 5
-        if row["area"] == "knowledge":
+        score += self._path_score_adjustment(query, row["path"], row["title"], row["area"]) * 20
+        if row["area"] == "knowledge" and not self._has_non_knowledge_intent(query):
             score -= 5
         snippet = compact_text(str(row["content"]))[:400]
         return KnowledgeHit(
@@ -726,6 +864,165 @@ class KBService:
             product=row["product"],
             area=row["area"],
         )
+
+    @staticmethod
+    def _fold(text: str) -> str:
+        normalized = unicodedata.normalize("NFD", text.lower())
+        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+    @classmethod
+    def _has_any(cls, folded_text: str, markers: list[str]) -> bool:
+        return any(cls._contains_phrase(folded_text, marker) for marker in markers)
+
+    @staticmethod
+    def _contains_phrase(folded_text: str, marker: str) -> bool:
+        folded_marker = KBService._fold(marker)
+        if re.search(r"[a-z0-9]", folded_marker):
+            return re.search(rf"(?<![a-z0-9]){re.escape(folded_marker)}(?![a-z0-9])", folded_text) is not None
+        return folded_marker in folded_text
+
+    @classmethod
+    def _query_products(cls, query: str) -> list[str]:
+        q = cls._fold(query)
+        products: list[str] = []
+        for product, aliases in PRODUCT_ALIASES.items():
+            markers = [product, *aliases]
+            if cls._has_any(q, markers):
+                products.append(product)
+        return products
+
+    @classmethod
+    def _has_non_knowledge_intent(cls, query: str) -> bool:
+        q = cls._fold(query)
+        markers = [
+            "strategy",
+            "chien luoc",
+            "roadmap",
+            "ke hoach",
+            "plan",
+            "ap26",
+            "kpi",
+            "okr",
+            "metric",
+            "chi so",
+            "monthly report",
+            "highlight",
+            "ship",
+            "ticket",
+            "issue",
+            "transid",
+            "ma loi",
+            "error",
+            "fail",
+            "source code",
+            "ma nguon",
+            "ham",
+            "function",
+            "file nao",
+            "checklist",
+            "audit",
+            "financial safety",
+            "trust-building",
+        ]
+        return cls._has_any(q, markers)
+
+    @classmethod
+    def _path_score_adjustment(cls, query: str, path: str, title: str, area: str) -> float:
+        q = cls._fold(query)
+        p = cls._fold(f"{path} {title}")
+        delta = 0.0
+        query_products = cls._query_products(query)
+
+        for product in query_products:
+            markers = [product, *PRODUCT_ALIASES.get(product, [])]
+            if cls._has_any(p, markers):
+                delta -= 0.25
+            elif any(cls._has_any(p, [other, *aliases]) for other, aliases in PRODUCT_ALIASES.items() if other != product):
+                delta += 0.2
+
+        exact_issues = [cls._fold(issue) for issue in re.findall(r"\bISSUE-\d+\b", query, flags=re.IGNORECASE)]
+        if exact_issues and path.startswith("03. Fact/CS Ticket/"):
+            if any(issue in p for issue in exact_issues):
+                delta -= 1.2
+            else:
+                delta += 0.9
+
+        strategy_like = cls._has_any(q, ["strategy", "chien luoc", "roadmap", "uu tien", "priority", "ap26", "focus"])
+        if not strategy_like and cls._contains_phrase(q, "wealth") and cls._has_any(q, ["san pham", "products", "liet ke", "hien co"]):
+            if path == "05. Knowledge/_Index.md":
+                delta -= 0.9
+
+        if strategy_like:
+            if path.startswith("01. Objective/Product Strategy/"):
+                delta -= 1.0
+            if path.startswith("02. Context/Confluence/Wealth General/"):
+                delta -= 0.35
+            if "plan" in p or "roadmap" in p or "planning" in p:
+                delta -= 0.15
+
+        if cls._has_any(q, ["monthly report", "highlight", "ship", "thang 2", "thang 3", "thang 4", "thang 5", "feb", "mar", "apr", "may"]):
+            if path.startswith("01. Objective/Monthly Report/"):
+                delta -= 0.9
+            month_map = {
+                "thang 2": ["feb"],
+                "thang 3": ["mar"],
+                "thang 4": ["apr"],
+                "thang 5": ["may"],
+            }
+            for marker, aliases in month_map.items():
+                if cls._contains_phrase(q, marker) and any(alias in p for alias in aliases):
+                    delta -= 0.25
+
+        if cls._has_any(q, ["kpi", "okr", "objective", "kr", "product contribution", "shared kpi", "chi so"]):
+            if path.startswith("01. Objective/Product KPI/"):
+                delta -= 0.85
+            if cls._contains_phrase(q, "product contribution") and "product contribution" in p:
+                delta -= 0.25
+            if cls._contains_phrase(q, "shared kpi") and "shared kpi" in p:
+                delta -= 0.25
+            if cls._contains_phrase(q, "okr") and "okr" in p:
+                delta -= 0.25
+
+        if cls._has_any(q, ["checklist", "audit", "financial safety", "trust-building", "trust building"]):
+            if path.startswith(".agents/skills/Audit/Product Audit/") or path.startswith("04. Skill/"):
+                delta -= 0.9
+            if path.startswith("01. Objective/Product KPI/03. Product Audit/"):
+                delta -= 0.45
+
+        if cls._has_any(q, ["issue", "ticket", "loi", "error", "fail", "khieu nai", "cs"]):
+            if path.startswith("03. Fact/CS Ticket/"):
+                delta -= 0.75
+            if path.startswith("03. Fact/Issue Investigation/"):
+                delta -= 0.65
+            if path.startswith("02. Context/Jira/"):
+                delta -= 0.35
+
+        if cls._has_any(q, ["transid", "transaction", "timeout", "retry"]):
+            if path.startswith("03. Fact/Issue Investigation/"):
+                delta -= 0.9
+            if path.startswith("03. Fact/Source Code/"):
+                delta -= 0.35
+
+        source_like = cls._has_any(q, ["source code", "ma nguon", "code", "ham", "function", "logic", "file nao", "controller", "handler"])
+        if source_like:
+            if path.startswith("03. Fact/Source Code/"):
+                delta -= 0.9
+                if cls._contains_phrase(q, "redemption") and "redemption" in p:
+                    delta -= 0.55
+                if any(marker in p for marker in ["controller", "handler", "service"]):
+                    delta -= 0.2
+                if any(marker in p for marker in ["/statics/", ".json", "nested-divisions"]):
+                    delta += 0.45
+
+        if cls._has_any(q, ["fs profile", "kyc", "risk assessment"]):
+            if path.startswith("02. Context/Confluence/FS Profile/") or path.startswith("02. Context/Confluence/FS Profle/"):
+                delta -= 0.8
+            if path.startswith("02. Context/Confluence/FS Hub/"):
+                delta -= 0.35
+
+        if area == "knowledge" and cls._has_non_knowledge_intent(query):
+            delta += 0.12
+        return delta
 
     def _safe_current_path(self, rel_path: str) -> Path:
         if not self.current_link.exists():
