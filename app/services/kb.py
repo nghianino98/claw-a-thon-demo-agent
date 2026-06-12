@@ -744,10 +744,24 @@ class KBService:
     def _path_hint_patterns(cls, query: str) -> list[str]:
         q = cls._fold(query)
         query_products = cls._query_products(query)
+        flow_like = cls._is_flow_query(q)
         patterns: list[str] = []
         if cls._contains_phrase(q, "wealth") and cls._has_any(q, ["san pham", "products", "liet ke", "hien co"]):
             if not cls._has_any(q, ["strategy", "chien luoc", "roadmap", "ap26"]):
                 patterns.append("05. Knowledge/_Index.md")
+        if flow_like and query_products:
+            for product in query_products:
+                patterns.extend(
+                    [
+                        f"02. Context/Confluence/{product}/Product Page/%",
+                        f"02. Context/Confluence/{product}/Technical Page/%",
+                        f"02. Context/Design/{product}/%",
+                    ]
+                )
+        if flow_like and cls._has_any(q, ["bao hiem", "insurance", "hop dong", "chon goi"]):
+            patterns.extend(["02. Context/Confluence/Insurance/Product Page/%", "02. Context/Design/Insurance/%"])
+        if flow_like and cls._has_any(q, ["mmf", "mo tai khoan", "onboarding", "dang ky", "user moi"]):
+            patterns.extend(["02. Context/Confluence/MMF/Product Page/%", "02. Context/Design/MMF/%"])
         if cls._has_any(q, ["strategy", "chien luoc", "roadmap", "uu tien", "priority", "ap26", "focus"]):
             patterns.extend(
                 [
@@ -780,7 +794,7 @@ class KBService:
         if cls._contains_phrase(q, "product contribution"):
             patterns.append("01. Objective/Product KPI/01. Product Contribution/%")
         if cls._contains_phrase(q, "shared kpi"):
-            patterns.append("01. Objective/Product KPI/02. Shared KPI/%")
+            patterns.extend(["01. Objective/Product KPI/02. Shared KPI/%", "01. Objective/Product KPI/00. OKR Framework/%"])
         if cls._has_any(q, ["checklist", "audit", "financial safety", "trust-building", "trust building"]):
             patterns.extend(
                 [
@@ -798,6 +812,10 @@ class KBService:
             patterns.append(f"02. Context/Jira/%{code}%")
         if not exact_issue and cls._has_any(q, ["ticket", "issue", "khieu nai", "cs ticket"]):
             patterns.append("03. Fact/CS Ticket/%")
+        if cls._is_cs_quality_query(q):
+            patterns.extend(["03. Fact/CS Ticket/%", "01. Objective/Product KPI/04. CS Ticket/%"])
+        if cls._has_any(q, ["ticket", "cap nhat", "gan day", "soi dong", "phat trien", "recent", "updated"]) and not cls._is_cs_quality_query(q):
+            patterns.append("02. Context/Jira/%")
         if cls._has_any(q, ["transid", "transaction", "timeout", "retry"]):
             patterns.append("03. Fact/Issue Investigation/%")
         if cls._has_any(q, ["source code", "ma nguon", "code", "ham", "function", "logic", "file nao", "controller", "handler"]):
@@ -825,7 +843,13 @@ class KBService:
                         )
                 patterns.extend(["03. Fact/Source Code/%controller%", "03. Fact/Source Code/%handler%"])
         if cls._has_any(q, ["fs profile", "kyc", "risk assessment"]):
-            patterns.extend(["02. Context/Confluence/FS Profile/%", "02. Context/Confluence/FS Profle/%", "02. Context/Confluence/FS Hub/%Profile%"])
+            patterns.extend([
+                "02. Context/Confluence/FS Profile/%",
+                "02. Context/Confluence/FS Profle/%",
+                "02. Context/Confluence/FS Hub/%Profile%",
+                "02. Context/Confluence/Wealth General/%",
+                "02. Context/Confluence/Z Products/User Management/%",
+            ])
         deduped: list[str] = []
         for pattern in patterns:
             if pattern not in deduped:
@@ -867,7 +891,7 @@ class KBService:
 
     @staticmethod
     def _fold(text: str) -> str:
-        normalized = unicodedata.normalize("NFD", text.lower())
+        normalized = unicodedata.normalize("NFD", text.lower()).replace("đ", "d")
         return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
     @classmethod
@@ -890,6 +914,35 @@ class KBService:
             if cls._has_any(q, markers):
                 products.append(product)
         return products
+
+    @classmethod
+    def _is_flow_query(cls, folded_query: str) -> bool:
+        return cls._has_any(
+            folded_query,
+            [
+                "luong",
+                "flow",
+                "onboarding",
+                "mo tai khoan",
+                "dang ky",
+                "user moi",
+                "mua",
+                "chon goi",
+                "nhan hop dong",
+                "buoc",
+                "entry point",
+                "dieu huong",
+                "kyc",
+                "risk assessment",
+            ],
+        )
+
+    @classmethod
+    def _is_cs_quality_query(cls, folded_query: str) -> bool:
+        return cls._has_any(folded_query, ["cs", "khieu nai", "support"]) and cls._has_any(
+            folded_query,
+            ["nhieu van de", "van de", "chat luong", "gan day", "recent", "nhat"],
+        )
 
     @classmethod
     def _has_non_knowledge_intent(cls, query: str) -> bool:
@@ -947,6 +1000,16 @@ class KBService:
             else:
                 delta += 0.9
 
+        flow_like = cls._is_flow_query(q)
+        if flow_like:
+            for product in query_products:
+                if path.startswith(f"02. Context/Confluence/{product}/"):
+                    delta -= 0.85
+                if path.startswith(f"02. Context/Design/{product}/"):
+                    delta -= 0.65
+            if path.startswith("02. Context/Others/") and "audit" in p:
+                delta += 0.35
+
         strategy_like = cls._has_any(q, ["strategy", "chien luoc", "roadmap", "uu tien", "priority", "ap26", "focus"])
         if not strategy_like and cls._contains_phrase(q, "wealth") and cls._has_any(q, ["san pham", "products", "liet ke", "hien co"]):
             if path == "05. Knowledge/_Index.md":
@@ -980,6 +1043,8 @@ class KBService:
                 delta -= 0.25
             if cls._contains_phrase(q, "shared kpi") and "shared kpi" in p:
                 delta -= 0.25
+            if cls._contains_phrase(q, "shared kpi") and path.startswith("01. Objective/Product KPI/00. OKR Framework/"):
+                delta -= 0.35
             if cls._contains_phrase(q, "okr") and "okr" in p:
                 delta -= 0.25
 
@@ -996,6 +1061,20 @@ class KBService:
                 delta -= 0.65
             if path.startswith("02. Context/Jira/"):
                 delta -= 0.35
+
+        if cls._is_cs_quality_query(q):
+            if path.startswith("03. Fact/CS Ticket/"):
+                delta -= 1.4
+            if path.startswith("01. Objective/Product KPI/04. CS Ticket/"):
+                delta -= 1.0
+            if path.startswith("01. Objective/Product KPI/03. Product Audit/"):
+                delta += 0.65
+            if path.startswith("01. Objective/Monthly Report/"):
+                delta += 0.3
+
+        if cls._has_any(q, ["ticket", "cap nhat", "gan day", "soi dong", "phat trien", "recent", "updated"]):
+            if path.startswith("02. Context/Jira/"):
+                delta -= 0.9
 
         if cls._has_any(q, ["transid", "transaction", "timeout", "retry"]):
             if path.startswith("03. Fact/Issue Investigation/"):
@@ -1019,6 +1098,12 @@ class KBService:
                 delta -= 0.8
             if path.startswith("02. Context/Confluence/FS Hub/"):
                 delta -= 0.35
+            if path.startswith("02. Context/Confluence/Wealth General/"):
+                delta -= 0.65
+            if path.startswith("02. Context/Confluence/Z Products/User Management/"):
+                delta -= 0.35
+            if path.startswith("03. Fact/Source Code/"):
+                delta += 0.45
 
         if area == "knowledge" and cls._has_non_knowledge_intent(query):
             delta += 0.12

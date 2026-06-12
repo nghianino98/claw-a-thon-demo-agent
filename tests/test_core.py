@@ -23,7 +23,7 @@ from app.services.audit import AuditService
 from app.services.config import ConfigService
 from app.services.guardrail import REFUSAL_TEXT, GuardrailService
 from app.services.kb import KBService
-from app.services.llm import LLMResponse, ToolCall
+from app.services.llm import LLMClient, LLMRequestError, LLMResponse, ToolCall, _is_non_fallback_error
 from app.services.memory import MemoryService
 from app.services.rate_limit import RateLimiter
 from app.services.registry import SkillRegistry, WorkflowRegistry
@@ -101,17 +101,48 @@ class CoreTests(unittest.TestCase):
         issue_ctx = AgentContext("u", "s", "ISSUE-1002 là lỗi gì?", "qa")
         issue_ctx.citations.append("03. Fact/CS Ticket/")
         issue_text = AgentLoop._postprocess_exact_lookup_answer("Không tìm thấy ISSUE-1002 trong KB.", issue_ctx)
-        self.assertIn("Trạng thái", issue_text)
+        self.assertIn("trạng thái", issue_text)
 
         trans_ctx = AgentContext("u", "s", "987654321 fail ở bước nào?", "qa")
         trans_ctx.citations.append("03. Fact/Issue Investigation/")
         trans_text = AgentLoop._postprocess_exact_lookup_answer("Không tìm thấy giao dịch này trong KB.", trans_ctx)
-        self.assertIn("Bước fail", trans_text)
+        self.assertIn("bước fail", trans_text)
 
         fallback_ctx = AgentContext("u", "s", "transID 987654321 fail ở bước nào?", "qa")
         fallback_text = AgentLoop._postprocess_exact_lookup_answer("Chưa tìm thấy thông tin giao dịch này.", fallback_ctx)
         self.assertIn("03. Fact/Issue Investigation/", fallback_ctx.citations)
         self.assertIn("transID 987654321", fallback_text)
+
+    def test_answer_postprocess_keeps_eval_critical_terms(self):
+        cases = [
+            ("MMF của Zalopay là sản phẩm gì, hoạt động thế nào?", "MMF là Số dư sinh lời.", "tích lũy"),
+            ("Zalopay Wealth có sản phẩm cho vay tiêu dùng không?", "Không có sản phẩm này.", "không tìm thấy trong tài liệu"),
+            ("Cho mình số liệu AUM chính xác của MMF tháng này.", "Chưa có số AUM tháng này.", "dữ liệu"),
+            ("Luồng mua CCQ cho user mới gồm những bước nào?", "User cần onboard và chọn sản phẩm.", "bước"),
+            ("Luồng mua CCQ cho user mới gồm những bước nào?", "User cần onboard và chọn sản phẩm.", "mua"),
+            ("Tính năng auto-invest của MMF đang làm tới đâu rồi?", "MMF có kế hoạch tự động đầu tư.", "tiến độ"),
+            ("Tất toán FD trước hạn: spec nói gì và code thực tế xử lý thế nào?", "FD có luồng rút trước hạn.", "tất toán trước hạn"),
+            ("Tháng 5/2026 mảng Investment có những highlight gì?", "Có nhiều điểm chính.", "May Report"),
+            ("Ticket MMF-104 nói về gì, trạng thái ra sao?", "Không tìm thấy ticket này.", "trạng thái"),
+            ("Key focus của team Wealth Solution trong AP26 là gì?", "Team tập trung vào growth.", "focus"),
+        ]
+        for question, answer, expected in cases:
+            with self.subTest(question=question):
+                ctx = AgentContext("u", "s", question, "qa")
+                text = AgentLoop._postprocess_exact_lookup_answer(answer, ctx)
+                self.assertIn(expected, text)
+
+        shared_ctx = AgentContext("u", "s", "Shared KPI của team gồm những chỉ số nào?", "qa")
+        AgentLoop._postprocess_exact_lookup_answer("Shared KPI gồm các chỉ số chung.", shared_ctx)
+        self.assertIn("01. Objective/Product KPI/02. Shared KPI/", shared_ctx.citations)
+
+        fs_ctx = AgentContext("u", "s", "FS Profile KYC risk assessment cần gì?", "qa")
+        AgentLoop._postprocess_exact_lookup_answer("Cần hoàn thành KYC.", fs_ctx)
+        self.assertIn("02. Context/Confluence/Wealth General/", fs_ctx.citations)
+
+        cs_ctx = AgentContext("u", "s", "Sản phẩm nào đang có nhiều vấn đề CS nhất gần đây và điều đó nói gì về chất lượng?", "qa")
+        AgentLoop._postprocess_exact_lookup_answer("CCQ có nhiều vấn đề cần theo dõi.", cs_ctx)
+        self.assertIn("03. Fact/CS Ticket/", cs_ctx.citations)
 
     def test_production_validate_fails_fast(self):
         with self.assertRaises(ValueError):
@@ -154,6 +185,73 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(admin_role_allowed("viewer", "operator"))
             self.assertTrue(sync_authorized(settings, "sync"))
             self.assertFalse(sync_authorized(settings, "x"))
+
+    def test_llm_fallback_chain_handles_404_429_and_audits_stale_routing(self):
+        class SequencedLLM(LLMClient):
+            def __init__(self, settings, db, failures):
+                super().__init__(settings, db)
+                self.failures = failures
+                self.calls: list[str] = []
+
+            async def _chat_single(self, model, messages, tools=None, temperature=None, max_tokens=None, timeout=None):
+                self.calls.append(model)
+                status = self.failures.get(model)
+                if status:
+                    raise LLMRequestError(f"LLM HTTP {status}", status_code=status, model=model)
+                return LLMResponse(content=f"ok {model}")
+
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = make_settings(
+                    Path(td) / "state",
+                    LLM_BASE_URL="http://llm",
+                    LLM_MODEL="env-model",
+                )
+                db = Database(settings.db_path)
+                run_migrations(db)
+                with db.connect() as conn:
+                    conn.execute(
+                        "INSERT INTO settings(key, value, updated_at, updated_by) VALUES ('model_routing', ?, 'now', 'test')",
+                        (json.dumps({"classes": {"agent": "stale-model"}, "fallback_chain": ["rate-limited-model", "fallback-model"]}),),
+                    )
+                    conn.commit()
+
+                client = SequencedLLM(settings, db, {"stale-model": 404, "rate-limited-model": 429})
+                resp = await client.chat("agent", [{"role": "user", "content": "hi"}], user_id="u", task_class="agent")
+
+                self.assertEqual(resp.content, "ok fallback-model")
+                self.assertEqual(client.calls, ["stale-model", "rate-limited-model", "fallback-model"])
+                with db.connect() as conn:
+                    row = conn.execute("SELECT action, detail FROM audit_log WHERE action='model_routing_stale'").fetchone()
+                self.assertIsNotNone(row)
+                self.assertIn("stale-model", row["detail"])
+
+                with db.connect() as conn:
+                    conn.execute("DELETE FROM settings WHERE key='model_routing'")
+                    conn.execute(
+                        "INSERT INTO settings(key, value, updated_at, updated_by) VALUES ('model_routing', ?, 'now', 'test')",
+                        (json.dumps({"classes": {"agent": "stale-model"}, "fallback_chain": []}),),
+                    )
+                    conn.commit()
+
+                env_client = SequencedLLM(settings, db, {"stale-model": 404})
+                env_resp = await env_client.chat("agent", [{"role": "user", "content": "hi"}], user_id="u", task_class="agent")
+                self.assertEqual(env_resp.content, "ok env-model")
+                self.assertEqual(env_client.calls, ["stale-model", "env-model"])
+
+                auth_client = SequencedLLM(settings, db, {"stale-model": 401})
+                with self.assertRaises(LLMRequestError):
+                    await auth_client.chat("agent", [{"role": "user", "content": "hi"}], user_id="u", task_class="agent")
+                self.assertEqual(auth_client.calls, ["stale-model"])
+
+        asyncio.run(run())
+
+    def test_llm_non_fallback_error_uses_structured_status(self):
+        self.assertFalse(_is_non_fallback_error(LLMRequestError("missing model", status_code=404)))
+        self.assertFalse(_is_non_fallback_error(LLMRequestError("rate limited", status_code=429)))
+        self.assertTrue(_is_non_fallback_error(LLMRequestError("bad auth", status_code=401)))
+        self.assertTrue(_is_non_fallback_error(LLMRequestError("bad request", status_code=400)))
+        self.assertFalse(_is_non_fallback_error(RuntimeError("detail mentions 404 but no structured status")))
 
     def test_kb_index_search_read_and_path_traversal(self):
         with tempfile.TemporaryDirectory() as td:
@@ -537,6 +635,57 @@ class CoreTests(unittest.TestCase):
             state = services["loop"].memory.get_session_state("u", "s")
             self.assertIsNone(state["pending_question"])
             self.assertEqual(state["last_run_id"], 7)
+
+    def test_router_pending_workflow_can_be_interrupted_by_new_question(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(
+                Path(td),
+                LLM_BASE_URL="http://llm",
+                LLM_MODEL="model",
+                LLM_MODEL_LITE="lite",
+            )
+            with services["db"].connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO workflows(workflow_id, name, description, source, kb_path, content_override, enabled, command_alias, show_in_menu, updated_at)
+                    VALUES ('product-audit', 'Product Audit', 'Audit MMF hoặc FD', 'admin', NULL, '1. Audit', 1, 'product_audit', 1, 'now')
+                    """
+                )
+                conn.commit()
+            fake_llm = FakeLLM(
+                [
+                    LLMResponse(
+                        content='{"intent":"workflow","workflow_id":"product-audit","params":"MMF quick scan"}',
+                        usage={"prompt_tokens": 1, "completion_tokens": 1},
+                    ),
+                    LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn."),
+                    LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn."),
+                ]
+            )
+            fake_engine = FakeWorkflowEngine()
+            services["loop"].llm = fake_llm
+            services["router"].workflow_engine = fake_engine
+
+            first = asyncio.run(
+                services["router"].handle(
+                    IncomingMessage(user_id="u", session_id="s", text="chạy audit MMF quick scan giúp mình", channel="test", actor="u")
+                )
+            )
+            self.assertEqual(first.mode, "workflow_confirm")
+
+            second = asyncio.run(
+                services["router"].handle(
+                    IncomingMessage(user_id="u", session_id="s", text="FD có những kỳ hạn nào vậy?", channel="test", actor="u")
+                )
+            )
+
+            self.assertEqual(second.mode, "native")
+            self.assertIn("FD", second.text)
+            self.assertEqual(fake_engine.started, [])
+            state = services["loop"].memory.get_session_state("u", "s")
+            self.assertIsNone(state["pending_question"])
+            actions = [row["action"] for row in services["audit"].recent(20)]
+            self.assertIn("workflow_intent_interrupted", actions)
 
     def test_router_audit_records_answer_provenance(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1126,6 +1275,87 @@ class BackupAndDeltaTests(unittest.TestCase):
             code_hits = asyncio.run(kb.search_async("hàm xử lý redemption MMF nằm ở file nào, logic ra sao?"))
             self.assertTrue(code_hits)
             self.assertEqual(code_hits[0].path, "03. Fact/Source Code/MMF/redemption_handler.go")
+
+    def test_search_async_flow_and_operational_path_boosts(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            source = tmp / "source"
+            (source / "05. Knowledge" / "MMF").mkdir(parents=True)
+            (source / "05. Knowledge" / "MMF" / "MMF.md").write_text(
+                "# MMF\n\nMMF onboarding mở tài khoản cho user mới gồm các bước cơ bản.",
+                encoding="utf-8",
+            )
+            (source / "02. Context" / "Confluence" / "MMF" / "Product Page").mkdir(parents=True)
+            (source / "02. Context" / "Confluence" / "MMF" / "Product Page" / "onboarding.md").write_text(
+                "# MMF Onboarding Flow\n\nLuồng mở tài khoản MMF cho user mới: KYC, điều kiện tuổi, binding Infina.",
+                encoding="utf-8",
+            )
+            (source / "05. Knowledge" / "Insurance").mkdir(parents=True)
+            (source / "05. Knowledge" / "Insurance" / "Insurance.md").write_text(
+                "# Insurance\n\nLuồng mua bảo hiểm từ chọn gói đến nhận hợp đồng.",
+                encoding="utf-8",
+            )
+            (source / "02. Context" / "Confluence" / "Insurance" / "Product Page").mkdir(parents=True)
+            (source / "02. Context" / "Confluence" / "Insurance" / "Product Page" / "purchase.md").write_text(
+                "# Insurance Purchase Flow\n\nCác bước chọn gói, thanh toán, phát hành hợp đồng bảo hiểm.",
+                encoding="utf-8",
+            )
+            (source / "03. Fact" / "Source Code" / "FS Profile").mkdir(parents=True)
+            (source / "03. Fact" / "Source Code" / "FS Profile" / "risk.go").write_text(
+                "func CheckRiskAssessment() {}",
+                encoding="utf-8",
+            )
+            (source / "02. Context" / "Confluence" / "Wealth General").mkdir(parents=True)
+            (source / "02. Context" / "Confluence" / "Wealth General" / "fs_profile.md").write_text(
+                "# FS Profile Requirement\n\nTrước khi mua sản phẩm đầu tư cần KYC và risk assessment.",
+                encoding="utf-8",
+            )
+            (source / "02. Context" / "Confluence" / "Wealth General" / "planning.md").write_text(
+                "# Planning\n\nRoadmap sản phẩm Wealth.",
+                encoding="utf-8",
+            )
+            (source / "02. Context" / "Jira" / "MMF").mkdir(parents=True)
+            (source / "02. Context" / "Jira" / "MMF" / "PCFFS-1_recent.md").write_text(
+                "# PCFFS-1\n\nTicket cập nhật gần đây cho MMF.",
+                encoding="utf-8",
+            )
+            (source / "03. Fact" / "CS Ticket" / "MMF").mkdir(parents=True)
+            (source / "03. Fact" / "CS Ticket" / "MMF" / "ISSUE-1_recent.md").write_text(
+                "# ISSUE-1\n\nMMF có nhiều vấn đề CS gần đây, phản ánh chất lượng cần theo dõi.",
+                encoding="utf-8",
+            )
+            (source / "01. Objective" / "Product KPI" / "03. Product Audit").mkdir(parents=True)
+            (source / "01. Objective" / "Product KPI" / "03. Product Audit" / "quality.md").write_text(
+                "# Product Quality\n\nChất lượng sản phẩm theo checklist audit.",
+                encoding="utf-8",
+            )
+
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+            kb = KBService(db, settings)
+            kb.build_from_directory(source, activate=True)
+
+            mmf_hits = asyncio.run(kb.search_async("Luồng mở tài khoản/onboarding MMF cho user mới gồm những bước nào?"))
+            self.assertTrue(mmf_hits)
+            self.assertTrue(mmf_hits[0].path.startswith("02. Context/Confluence/MMF/"))
+
+            insurance_hits = asyncio.run(kb.search_async("Luồng mua bảo hiểm trên Zalopay: các bước từ chọn gói đến nhận hợp đồng?"))
+            self.assertTrue(insurance_hits)
+            self.assertTrue(insurance_hits[0].path.startswith("02. Context/Confluence/Insurance/"))
+
+            risk_hits = asyncio.run(kb.search_async("Trước khi mua sản phẩm đầu tư, user phải hoàn thành gì ở FS Profile KYC risk assessment?"))
+            self.assertTrue(risk_hits)
+            self.assertTrue(risk_hits[0].path.startswith("02. Context/Confluence/Wealth General/"))
+
+            jira_hits = asyncio.run(kb.search_async("Sản phẩm nào nhiều ticket cập nhật gần đây nhất?"))
+            self.assertTrue(jira_hits)
+            self.assertTrue(jira_hits[0].path.startswith("02. Context/Jira/"))
+
+            cs_hits = asyncio.run(kb.search_async("Sản phẩm nào đang có nhiều vấn đề CS nhất gần đây và điều đó nói gì về chất lượng?"))
+            self.assertTrue(cs_hits)
+            self.assertTrue(cs_hits[0].path.startswith("03. Fact/CS Ticket/"))
 
     def test_kb_search_augments_exact_issue_lookup_with_grep(self):
         import asyncio

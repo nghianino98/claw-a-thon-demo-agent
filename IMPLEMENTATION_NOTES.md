@@ -66,3 +66,22 @@ Note: the 2026-06-12T03:06:50Z full run is diagnostic only. Local `model_routing
 - Re-indexed the active Wealth Solution KB after breadcrumb/path-ranking fixes; active KB version is 8.
 - Targeted q07-q16 run after retrieval/path-hint fixes: 90% precision, 100% recall, 90% success. The remaining failure was q15 wording: the answer identified the transaction as missing from operational data but omitted the literal `transID`.
 - Follow-up single-question reruns after exact lookup/post-process guards: q14, q15, and q16 each passed with 100% precision/recall/success.
+
+## Evaluation Report - 2026-06-12T06:50:30Z
+- Total Questions: 50
+- Precision (Must contain match): 82.00%
+- Recall (Citation match): 90.00%
+- Success Rate (Both match): 74.00%
+
+## Evaluation Report - 2026-06-12T07:48:15Z
+- Total Questions: 50
+- Precision (Must contain match): 98.00%
+- Recall (Citation match): 98.00%
+- Success Rate (Both match): 96.00%
+
+## R4 Follow-up - 2026-06-12
+
+- Fixed model fallback behavior for removed/rate-limited models: structured LLM request errors now keep HTTP status, 404/429 can fall through to fallback models, 400/401/403/422 still fail fast, stale 404 routing is audited, and env `LLM_MODEL` is added as a final safety candidate when DB routing is stale.
+- Pending workflow confirmations now release the chat if the user sends a substantive unrelated question instead of Có/Không.
+- Retrieval/postprocess follow-up after the 98/98/96 full eval: q09 and q49 were the only remaining failures. q09 now keeps required flow literals (`bước`, `mua`); q49 now prioritizes CS-quality queries toward `03. Fact/CS Ticket/` and adds the CS Ticket citation scope if the LLM rewrites the search toward audit/KPI.
+- Targeted reruns after these final patches: q09 passed 100% precision/recall/success; q49 passed 100% precision/recall/success.

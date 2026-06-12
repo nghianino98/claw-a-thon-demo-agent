@@ -169,6 +169,19 @@ class MessageRouter:
 
         decision = self._confirmation_decision(text)
         if decision is None:
+            if self._should_interrupt_pending_confirmation(text):
+                state["pending_question"] = None
+                self.agent_loop.memory.save_session_state(incoming.user_id, incoming.session_id, state)
+                self.audit.record(
+                    incoming.actor or incoming.user_id,
+                    "workflow_intent_interrupted",
+                    incoming.channel,
+                    {
+                        "workflow_id": pending.get("workflow_id"),
+                        "reason": "new_user_message",
+                    },
+                )
+                return None
             return AgentReply(
                 text="Bạn xác nhận giúp mình: Có để chạy workflow, hoặc Không để hủy.",
                 mode="workflow_confirm",
@@ -342,6 +355,19 @@ class MessageRouter:
         return None
 
     @staticmethod
+    def _should_interrupt_pending_confirmation(text: str) -> bool:
+        normalized = MessageRouter._fold(re.sub(r"[!?.~]+", " ", text.strip()))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return False
+        if normalized.startswith("/"):
+            return True
+        words = normalized.split()
+        if len(words) >= 5:
+            return True
+        return "?" in text and len(words) >= 3
+
+    @staticmethod
     def _decode_pending_workflow(value: Any) -> dict[str, Any] | None:
         if not value:
             return None
@@ -469,7 +495,7 @@ class MessageRouter:
 
     @staticmethod
     def _fold(text: str) -> str:
-        normalized = unicodedata.normalize("NFD", text.lower())
+        normalized = unicodedata.normalize("NFD", text.lower()).replace("đ", "d")
         return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
     def _refresh_runtime_config(self) -> None:

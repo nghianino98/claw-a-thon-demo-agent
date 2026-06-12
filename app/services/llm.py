@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -25,6 +28,14 @@ class LLMResponse:
     raw_message: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
     model: str = ""
+
+
+class LLMRequestError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None, model: str = "", detail: str = ""):
+        self.status_code = status_code
+        self.model = model
+        self.detail = detail
+        super().__init__(message)
 
 
 class LLMClient:
@@ -115,6 +126,8 @@ class LLMClient:
         for m in fallback_chain:
             if m and m not in candidates:
                 candidates.append(m)
+        if model in {"lite", "agent", "code", "deep"} and self.settings.llm_model and self.settings.llm_model not in candidates:
+            candidates.append(self.settings.llm_model)
 
         last_error = None
         for candidate in candidates:
@@ -131,10 +144,46 @@ class LLMClient:
                 return resp
             except Exception as exc:
                 last_error = exc
+                if _error_status_code(exc) == 404:
+                    self._record_model_routing_stale(candidate, primary_model, task_class or model, user_id)
                 if _is_non_fallback_error(exc):
                     raise
                 continue
         raise RuntimeError(f"All candidate models failed. Last error: {last_error}") from last_error
+
+    def _record_model_routing_stale(
+        self,
+        failed_model: str,
+        primary_model: str,
+        task_class: str | None,
+        user_id: str | None,
+    ) -> None:
+        if not self.db:
+            return
+        try:
+            with self.db.connect() as conn:
+                conn.execute("PRAGMA busy_timeout=1000")
+                conn.execute(
+                    "INSERT INTO audit_log(actor, action, target, detail, created_at) VALUES (?,?,?,?,?)",
+                    (
+                        user_id or "system",
+                        "model_routing_stale",
+                        "llm",
+                        json.dumps(
+                            {
+                                "failed_model": failed_model,
+                                "primary_model": primary_model,
+                                "task_class": task_class,
+                                "status_code": 404,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                    ),
+                )
+                conn.commit()
+        except Exception:
+            pass
 
     async def _chat_single(
         self,
@@ -183,10 +232,13 @@ class LLMClient:
                 if resp.status_code in {429, 500, 502, 503, 504}:
                     retry_after = resp.headers.get("retry-after")
                     detail = _response_error_detail(resp)
-                    last_error = RuntimeError(
+                    last_error = LLMRequestError(
                         f"LLM transient HTTP {resp.status_code}"
                         + (f" retry_after={retry_after}" if retry_after else "")
-                        + (f" detail={detail}" if detail else "")
+                        + (f" detail={detail}" if detail else ""),
+                        status_code=resp.status_code,
+                        model=model,
+                        detail=detail,
                     )
                     continue
                 resp.raise_for_status()
@@ -198,7 +250,15 @@ class LLMClient:
                 continue
             except httpx.HTTPStatusError as exc:
                 detail = _response_error_detail(exc.response)
-                raise RuntimeError(f"LLM HTTP {exc.response.status_code}" + (f" detail={detail}" if detail else "")) from exc
+                status_code = exc.response.status_code
+                raise LLMRequestError(
+                    f"LLM HTTP {status_code}" + (f" detail={detail}" if detail else ""),
+                    status_code=status_code,
+                    model=model,
+                    detail=detail,
+                ) from exc
+        if isinstance(last_error, LLMRequestError):
+            raise last_error
         raise RuntimeError(f"LLM request failed within {timeout or self.settings.llm_timeout_seconds}s: {last_error}") from last_error
 
     def _parse(self, data: dict[str, Any], latency_ms: int) -> LLMResponse:
@@ -245,11 +305,24 @@ def _response_error_detail(resp: httpx.Response, limit: int = 200) -> str:
 
 
 def _is_non_fallback_error(exc: Exception) -> bool:
+    status_code = _error_status_code(exc)
+    if status_code is not None:
+        return status_code in {400, 401, 403, 422}
     text = str(exc).lower()
     if "llm is not configured" in text or "not configured" in text:
         return True
-    if any(marker in text for marker in ("401", "403", "404", "400", "422", "429")):
+    if re.search(r"\b(?:400|401|403|422)\b", text):
         return True
     if any(marker in text for marker in ("unauthorized", "forbidden", "invalid api key", "authentication")):
         return True
     return False
+
+
+def _error_status_code(exc: Exception) -> int | None:
+    if isinstance(exc, LLMRequestError):
+        return exc.status_code
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    return None
