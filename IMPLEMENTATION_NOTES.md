@@ -98,3 +98,27 @@ Note: the 2026-06-12T03:06:50Z full run is diagnostic only. Local `model_routing
 - Added narrow postprocess retention for quality/checklist/CS Ticket wording and audit-source scope for MMF checklist quality questions.
 - Targeted q48-q49 rerun after this final patch: 100% precision, 100% recall, 100% success.
 - Production go-live remains operationally gated: `.env.production` still has empty `S3_*` values, so S3 staging backup/restore smoke and redeploy-restore verification have not been run yet. Telegram bot token rotation is also still an external pre-go-live step.
+
+## Evaluation Report - 2026-06-12T09:55:24Z
+- Total Questions: 50
+- Precision (Must contain match): 98.00%
+- Recall (Citation match): 98.00%
+- Success Rate (Both match): 98.00%
+
+## Evaluation Report - 2026-06-12T09:57:54Z
+- Total Questions: 1
+- Precision (Must contain match): 0.00%
+- Recall (Citation match): 0.00%
+- Success Rate (Both match): 0.00%
+
+## Evaluation Report - 2026-06-12T10:00:33Z
+- Total Questions: 1
+- Precision (Must contain match): 0.00%
+- Recall (Citation match): 100.00%
+- Success Rate (Both match): 0.00%
+
+## Evaluation Report - 2026-06-12T10:01:42Z
+- Total Questions: 1
+- Precision (Must contain match): 100.00%
+- Recall (Citation match): 100.00%
+- Success Rate (Both match): 100.00%

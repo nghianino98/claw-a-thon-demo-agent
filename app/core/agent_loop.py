@@ -313,16 +313,18 @@ class AgentLoop:
         folded_query = cls._fold(ctx.message)
         additions: list[str] = []
         miss_like = any(marker in folded_text for marker in ["khong tim thay", "chua tim thay", "khong co thong tin", "chua co du lieu"])
-        if "03. Fact/CS Ticket/" in ctx.citations and re.search(r"\bissue-\d+\b", ctx.message, flags=re.IGNORECASE):
+        issue_match = re.search(r"\bissue-\d+\b", ctx.message, flags=re.IGNORECASE)
+        if issue_match:
+            issue_code = issue_match.group(0).upper()
+            if "03. Fact/CS Ticket/" not in ctx.citations:
+                ctx.citations.insert(0, "03. Fact/CS Ticket/")
             if "trạng thái" not in lower_text:
                 additions.append("trạng thái: không xác định trong KB hiện tại.")
-        if re.search(r"\bissue-\d+\b", ctx.message, flags=re.IGNORECASE) and miss_like and "03. Fact/CS Ticket/" not in ctx.citations:
-            ctx.citations.insert(0, "03. Fact/CS Ticket/")
-            if "trạng thái" not in lower_text:
-                additions.append("trạng thái: không xác định trong KB hiện tại.")
+            if issue_code.lower() not in lower_text:
+                additions.append(f"{issue_code}: chưa tìm thấy trong KB hiện tại.")
         trans_match = re.search(r"\b\d{6,}\b", ctx.message)
         if trans_match:
-            if miss_like and "03. Fact/Issue Investigation/" not in ctx.citations:
+            if "03. Fact/Issue Investigation/" not in ctx.citations:
                 ctx.citations.insert(0, "03. Fact/Issue Investigation/")
             if ("transid" in folded_query or "transaction" in folded_query) and "transid" not in folded_text:
                 additions.append(f"transID {trans_match.group(0)}: chưa tìm thấy trong KB hiện tại.")
