@@ -120,9 +120,8 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_agent_connections_enabled ON agent_connections(enabled, is_default);
       `);
 
-      const existing = db.prepare("SELECT COUNT(*) AS count FROM agent_connections").get() as { count: number };
       const baseUrl = process.env.AGENT_BASE_URL?.trim();
-      if (existing.count > 0 || !baseUrl) return;
+      if (!baseUrl) return;
 
       const id = (process.env.AGENT_CONNECTION_ID || "queo-solution-agent").trim();
       const name = (process.env.AGENT_CONNECTION_NAME || "Quéo Solution Agent").trim();
@@ -137,11 +136,19 @@ const migrations: Migration[] = [
         }
       };
 
+      // Always upsert so base_url/tokens stay in sync with env vars across deploys
       db.prepare(`
         INSERT INTO agent_connections (
           id, name, base_url, api_key_encrypted, admin_token_encrypted,
           enabled, is_default, status, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, 1, 1, 'unknown', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          base_url = excluded.base_url,
+          api_key_encrypted = excluded.api_key_encrypted,
+          admin_token_encrypted = excluded.admin_token_encrypted,
+          enabled = 1,
+          is_default = 1,
+          updated_at = excluded.updated_at
       `).run(
         id,
         name,

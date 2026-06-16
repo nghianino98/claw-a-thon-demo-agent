@@ -190,7 +190,7 @@ async function resolveMcpEndpoint(input: {
         url: baseUrl,
         apiKey: MCP_APIKEY,
         source: selected.name || input.mcpConnectionId,
-        headers: isJiraConfluenceMcp(selected) && JIRA_MCP_SECRET ? { "x-mcp-secret": JIRA_MCP_SECRET } : undefined,
+        headers: JIRA_MCP_SECRET ? { "x-mcp-secret": JIRA_MCP_SECRET } : undefined,
       };
     }
 
