@@ -124,41 +124,56 @@ class AgentLoop:
                 asyncio.create_task(self._trigger_rolling_summary(ctx.user_id, ctx.session_id))
         return reply
 
-    async def _run_retrieval_qa(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
-        hits = await self._search_hits(ctx.message, top_k=5, ctx=ctx)
-        if not hits:
-            return self._reply("Mình chưa tìm thấy thông tin đủ liên quan trong KB cho câu hỏi này.", ctx, 0, "fallback")
-        ctx.citations.extend(hit.path for hit in hits)
-        messages = [
+    def _retrieval_messages(self, ctx: AgentContext, history: list[dict[str, str]], hits: list[Any], compact: bool) -> list[dict[str, Any]]:
+        # compact=True: rút gọn context + yêu cầu trả lời ngắn để model sinh nhanh hơn
+        # (dùng cho lần retry khi lần đầu bị timeout do context lớn).
+        context = self._retrieval_context(hits, max_hits=2, per_hit_chars=700, total_chars=1800) if compact else self._retrieval_context(hits)
+        brevity = "\nTrả lời thật gọn (tối đa ~6 gạch đầu dòng), chỉ giữ ý chính." if compact else ""
+        return [
             {"role": "system", "content": self._retrieval_system_prompt(ctx)},
             {
                 "role": "user",
                 "content": (
                     f"Câu hỏi cần trả lời: {ctx.message}\n\n"
                     f"Ngữ cảnh hội thoại gần đây:\n{self._compact_history_for_prompt(history)}\n\n"
-                    f"Trích xuất KB nội bộ:\n{self._retrieval_context(hits)}\n\n"
-                    "Hãy trả lời trực tiếp cho user bằng tiếng Việt."
+                    f"Trích xuất KB nội bộ:\n{context}\n\n"
+                    "Hãy trả lời trực tiếp cho user bằng tiếng Việt." + brevity
                 ),
             },
         ]
-        try:
-            resp = await self.llm.chat(
-                loop_model,
-                messages,
-                tools=None,
-                temperature=temperature_for_mode(ctx.mode),
-                timeout=min(45, self._llm_timeout_for_mode(ctx.mode, started)),
-                user_id=ctx.user_id,
-                task_class=task_class,
-            )
-            self._record_llm_call(resp, "retrieval_qa", ctx)
-            text = resp.content.strip()
-            if not text:
-                raise RuntimeError("empty retrieval QA response")
-            return self._reply(text, ctx, 1, "retrieval")
-        except Exception as exc:
-            self.audit.record(ctx.user_id, "agent_retrieval_error", ctx.session_id, {"error": str(exc)})
-            return await self._fallback(ctx, reason=str(exc), hits=hits)
+
+    async def _run_retrieval_qa(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
+        hits = await self._search_hits(ctx.message, top_k=5, ctx=ctx)
+        if not hits:
+            return self._reply("Mình chưa tìm thấy thông tin đủ liên quan trong KB cho câu hỏi này.", ctx, 0, "fallback")
+        ctx.citations.extend(hit.path for hit in hits)
+
+        # Lần 1: context đầy đủ, timeout rộng. Chỉ khi lần 1 fail vì TIMEOUT/empty mới retry
+        # lần 2 với context rút gọn + yêu cầu trả lời ngắn (model MaaS chậm vẫn kịp sinh).
+        # KHÔNG retry với lỗi rate-limit (429)/HTTP để tránh đập vào model đang bị giới hạn.
+        last_exc: Exception | None = None
+        for attempt, compact in enumerate((False, True)):
+            if attempt > 0 and not self._retrieval_should_retry(last_exc):
+                break
+            try:
+                resp = await self.llm.chat(
+                    loop_model,
+                    self._retrieval_messages(ctx, history, hits, compact=compact),
+                    tools=None,
+                    temperature=temperature_for_mode(ctx.mode),
+                    timeout=min(40 if compact else 70, self._llm_timeout_for_mode(ctx.mode, started)),
+                    user_id=ctx.user_id,
+                    task_class=task_class,
+                )
+                self._record_llm_call(resp, "retrieval_qa", ctx)
+                text = resp.content.strip()
+                if not text:
+                    raise RuntimeError("empty retrieval QA response")
+                return self._reply(text, ctx, attempt + 1, "retrieval")
+            except Exception as exc:
+                last_exc = exc
+                self.audit.record(ctx.user_id, "agent_retrieval_error", ctx.session_id, {"error": str(exc), "attempt": attempt + 1})
+        return await self._fallback(ctx, reason=str(last_exc) if last_exc else None, hits=hits)
 
     async def _run_native(self, ctx: AgentContext, history: list[dict[str, str]], started: float, loop_model: str, task_class: str) -> AgentReply:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.prompts.build(ctx, json_mode=False)}]
@@ -421,7 +436,9 @@ class AgentLoop:
         return trimmed
 
     def _llm_timeout_for_mode(self, mode: str, started: float | None = None) -> int:
-        ceiling = 90 if mode == "deep" else 60 if mode == "workflow_step" else 55
+        # qa mode = RAG 1-shot (1 lần gọi LLM) nên cho ceiling rộng (75s) để model MaaS chậm
+        # vẫn kịp sinh câu trả lời cho query có context lớn; deep vẫn 90, workflow_step 60.
+        ceiling = 90 if mode == "deep" else 60 if mode == "workflow_step" else 75
         if started is not None:
             remaining = int(self._total_timeout_for_mode(mode) - (time.perf_counter() - started) - 1)
             ceiling = min(ceiling, remaining)
@@ -430,7 +447,8 @@ class AgentLoop:
     def _total_timeout_for_mode(self, mode: str) -> int:
         if mode == "deep":
             return max(30, self.settings.agent_deep_timeout_seconds)
-        ceiling = 300 if mode == "workflow_step" else 85
+        # qa/chat: nới ngân sách tổng (130s) để chứa lần RAG đầu (70s) + retry context nhỏ (40s).
+        ceiling = 300 if mode == "workflow_step" else 130
         return max(10, min(ceiling, self.settings.agent_total_timeout_seconds))
 
     def _max_steps_for_mode(self, mode: str) -> int:
@@ -473,22 +491,22 @@ class AgentLoop:
         except Exception:
             return ""
 
-    def _retrieval_context(self, hits: list[Any]) -> str:
+    def _retrieval_context(self, hits: list[Any], max_hits: int = 3, per_hit_chars: int = 1400, total_chars: int = 4500) -> str:
         blocks: list[str] = []
         total = 0
-        for idx, hit in enumerate(hits[:3], start=1):
+        for idx, hit in enumerate(hits[:max_hits], start=1):
             text = self._read_hit_text(hit)
             if not text:
                 text = str(getattr(hit, "snippet", ""))
             text = self._clean_kb_excerpt(text)
             if not text:
                 continue
-            if len(text) > 1400:
-                text = text[:1400].rstrip() + "..."
+            if len(text) > per_hit_chars:
+                text = text[:per_hit_chars].rstrip() + "..."
             block = f"[KB {idx}] {text}"
             blocks.append(block)
             total += len(block)
-            if total > 4500:
+            if total > total_chars:
                 break
         return "\n\n".join(blocks)
 
@@ -572,6 +590,10 @@ class AgentLoop:
         text = re.sub(r"(?m)^\s*\d+:\s*", "", text)
         text = re.sub(r"\[Breadcrumb:[^\]]*\]", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"\bBreadcrumb:\s*.*?\.md\b", " ", text, flags=re.IGNORECASE)
+        # Bỏ header/boilerplate nội bộ của doc (mệnh lệnh cho AI) khỏi text hiển thị cho user.
+        text = re.sub(r"\bIMPORTANT\b[^\n]*", " ", text)
+        text = re.sub(r"\(?\s*MỆNH LỆNH BẮT BUỘC\s*\)?", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bYÊU CẦU TỐI THƯỢNG\b", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"\S*%[0-9A-Fa-f]{2}\S*", " ", text)
         text = re.sub(r"\b\d*[A-Za-z]*Drive/\S*", " ", text)
         text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
@@ -664,6 +686,21 @@ class AgentLoop:
         if any(marker in text for marker in ("timeout", "timed out", "transport", "connection", "request failed")):
             return False
         return True
+
+    @staticmethod
+    def _retrieval_should_retry(exc: Exception | None) -> bool:
+        # Retry RAG (với context rút gọn) chỉ khi lỗi do timeout hoặc model trả rỗng —
+        # KHÔNG retry khi rate-limit (429)/HTTP error để tránh đập vào model đang bị giới hạn.
+        if exc is None:
+            return False
+        text = str(exc).lower()
+        if "empty retrieval qa response" in text:
+            return True
+        if re.search(r"\b(?:401|403|404|429|500|502|503|504)\b", text):
+            return False
+        if isinstance(exc, TimeoutError):
+            return True
+        return any(marker in text for marker in ("timeout", "timed out", "readtimeout"))
 
     async def _extract_facts(self, user_id: str, message: str) -> None:
         if not self.settings.llm_model_lite:

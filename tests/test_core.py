@@ -369,6 +369,41 @@ class CoreTests(unittest.TestCase):
             # RAG synthesis call không truyền tool schema cho model.
             self.assertIsNone(fake.calls[0]["tools"])
 
+    def test_retrieval_qa_retries_with_compact_context_on_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # Lần 1 timeout → retry context rút gọn → lần 2 thành công.
+            fake = FakeLLM(
+                [
+                    RuntimeError("LLM request failed within 70s: ReadTimeout"),
+                    LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn."),
+                ]
+            )
+            services["loop"].llm = fake
+
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+
+            self.assertEqual(reply.mode, "retrieval")
+            self.assertIn("FD", reply.text)
+            self.assertEqual(len(fake.calls), 2)
+
+    def test_retrieval_qa_does_not_retry_on_rate_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # 429 = rate-limit → KHÔNG retry, đi thẳng fallback (chỉ 1 lần gọi).
+            fake = FakeLLM(
+                [
+                    RuntimeError("LLM request failed: transient HTTP 429"),
+                    LLMResponse(content="không nên gọi tới đây"),
+                ]
+            )
+            services["loop"].llm = fake
+
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+
+            self.assertEqual(reply.mode, "fallback")
+            self.assertEqual(len(fake.calls), 1)
+
     def test_deep_command_uses_deep_budget_and_strips_prefix(self):
         with tempfile.TemporaryDirectory() as td:
             services = build_test_services(
