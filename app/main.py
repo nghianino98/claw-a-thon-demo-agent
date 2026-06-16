@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Form
 from fastapi import UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import __version__
 from app.channels.base import IncomingMessage
@@ -34,6 +34,7 @@ from app.services.guardrail import GuardrailService
 from app.services.kb import KBService
 from app.services.llm import LLMClient
 from app.services.memory import MemoryService
+from app.services.mcp_manager import McpManager, McpServerConfig
 from app.services.rate_limit import RateLimiter
 from app.services.registry import SkillRegistry, WorkflowRegistry
 from app.services.cron_scheduler import CronSchedulerService
@@ -71,6 +72,7 @@ class Services:
     backup: BackupService
     guardrail: GuardrailService
     cron_scheduler: CronSchedulerService
+    mcp: McpManager
 
 
 class InvocationRequest(BaseModel):
@@ -80,7 +82,8 @@ class InvocationRequest(BaseModel):
 
 
 class InstructionRequest(BaseModel):
-    content: str
+    content: str | None = None
+    instructions: str | None = None
     name: str = "persona"
 
 
@@ -134,6 +137,34 @@ class WorkflowUpdate(BaseModel):
     enabled: bool | None = None
     command_alias: str | None = None
     show_in_menu: bool | None = None
+
+
+class McpServerCreate(BaseModel):
+    server_id: str
+    name: str
+    prefix: str
+    transport: str = "stdio"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    base_url: str | None = None
+    env_public: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = False
+
+
+class McpServerUpdate(BaseModel):
+    name: str | None = None
+    prefix: str | None = None
+    transport: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    base_url: str | None = None
+    env_public: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class McpSecretUpdate(BaseModel):
+    secret_key: str
+    value: str
 
 
 def auth_actor(request: Request, fallback: str = "system") -> str:
@@ -222,9 +253,43 @@ def bump_registry_version(services: Services, actor: str) -> int:
         return version
 
 
+async def notify_and_reset_telegram_owners(services: Services, actor: str) -> None:
+    if not actor or not actor.startswith("didi:"):
+        return
+    settings = get_settings()
+    if services.telegram_client.configured and settings.telegram_owner_user_ids:
+        for owner_id in settings.telegram_owner_user_ids:
+            try:
+                user_key = f"tg-{owner_id}"
+                chat_key = f"tg-chat-{owner_id}"
+                
+                # Reset Telegram session state to force a new clean segment (equivalent to /new)
+                state = services.memory.get_session_state(user_key, chat_key)
+                state["segment_no"] = state.get("segment_no", 1) + 1
+                state["summary"] = ""
+                state["active_skill"] = None
+                state["pending_question"] = None
+                state["segment_started_message_id"] = 0
+                services.memory.save_session_state(user_key, chat_key, state)
+                
+                await services.telegram_client.send_message(
+                    owner_id,
+                    f"🤖 <b>Quéo đã được cập nhật cấu hình mới bởi {actor.split(':', 1)[-1]}!</b>\n\n"
+                    "Phiên trò chuyện của bạn đã được tự động làm mới (tương đương lệnh <code>/new</code>) để sẵn sàng thử nghiệm. Hãy gửi tin nhắn bất kỳ để tiếp tục nhé! 🦆"
+                )
+            except Exception as e:
+                log_event("warning", "telegram_instruction_notify_failed", error=str(e), owner_id=owner_id)
+
+
 def bump_registry_and_sync(services: Services, actor: str) -> None:
     bump_registry_version(services, actor)
     schedule_telegram_command_sync(services)
+    if services.telegram_client.configured:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(notify_and_reset_telegram_owners(services, actor))
+        except RuntimeError:
+            pass
 
 
 def backup_warning(settings: Settings, backup: BackupService) -> str | None:
@@ -246,6 +311,47 @@ def run_backup_best_effort(services: Services, reason: str, target: str, actor: 
         log_event("error", "backup_failed", reason=reason, target=target, error=str(exc))
         services.audit.record(actor, "backup_failed", target, {"reason": reason, "error": str(exc)})
         return None
+
+
+def serialize_mcp_server(config: McpServerConfig) -> dict[str, Any]:
+    return {
+        "server_id": config.server_id,
+        "id": config.server_id,
+        "name": config.name,
+        "prefix": config.prefix,
+        "transport": config.transport,
+        "command": config.command,
+        "args": config.args,
+        "base_url": config.base_url,
+        "env_public": config.env_public,
+        "enabled": config.enabled,
+        "status": config.status,
+        "last_error": config.last_error,
+        "last_checked_at": config.last_checked_at,
+        "tool_count": config.tool_count,
+        "secret_keys": config.secret_keys,
+    }
+
+
+def mcp_config_from_payload(body: McpServerCreate) -> McpServerConfig:
+    transport = body.transport.strip().lower()
+    if transport not in {"stdio", "http"}:
+        raise HTTPException(status_code=400, detail="transport must be stdio or http")
+    if transport == "stdio" and not body.command:
+        raise HTTPException(status_code=400, detail="stdio transport requires command")
+    if transport == "http" and not body.base_url:
+        raise HTTPException(status_code=400, detail="http transport requires base_url")
+    return McpServerConfig(
+        server_id=body.server_id.strip(),
+        name=body.name.strip(),
+        prefix=body.prefix.strip(),
+        transport=transport,
+        command=body.command.strip() if body.command else None,
+        args=[str(item) for item in body.args],
+        base_url=body.base_url.strip() if body.base_url else None,
+        env_public={str(key): value for key, value in body.env_public.items()},
+        enabled=body.enabled,
+    )
 
 
 def validate_model_routing(services: Services, value: Any) -> None:
@@ -271,6 +377,45 @@ def validate_model_routing(services: Services, value: Any) -> None:
                     status_code=409,
                     detail=f"Model {model} is not profiled for tool calling required by {task_class}",
                 )
+
+
+def validate_model_pricing(value: Any) -> dict[str, dict[str, float]]:
+    """model_pricing = {"<model>": {"input_per_1m": float, "output_per_1m": float}} (USD per 1M tokens)."""
+    pricing = value
+    if isinstance(value, str):
+        try:
+            pricing = json.loads(value) if value.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid model_pricing JSON: {exc}") from exc
+    if not isinstance(pricing, dict):
+        raise HTTPException(status_code=400, detail="model_pricing must be an object")
+    out: dict[str, dict[str, float]] = {}
+    for model, rates in pricing.items():
+        if not isinstance(rates, dict):
+            raise HTTPException(status_code=400, detail=f"model_pricing[{model}] must be an object")
+        entry: dict[str, float] = {}
+        for field_name in ("input_per_1m", "output_per_1m"):
+            raw = rates.get(field_name, 0)
+            try:
+                num = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"model_pricing[{model}].{field_name} must be a number") from exc
+            if num < 0:
+                raise HTTPException(status_code=400, detail=f"model_pricing[{model}].{field_name} must be >= 0")
+            entry[field_name] = num
+        out[str(model)] = entry
+    return out
+
+
+def resolve_model_pricing(services: Services) -> dict[str, dict[str, float]]:
+    """Read the manual model_pricing override from settings (authoritative cost source)."""
+    raw = services.config.get_setting("model_pricing", "")
+    if not raw:
+        return {}
+    try:
+        return validate_model_pricing(raw)
+    except HTTPException:
+        return {}
 
 
 def build_services(settings: Settings) -> Services:
@@ -302,6 +447,7 @@ def build_services(settings: Settings) -> Services:
     backup = BackupService(db, settings)
     llm = LLMClient(settings, db)
     tools = ToolRegistry(settings, kb, memory, skills)
+    mcp = McpManager(settings, db, tools)
     prompts = PromptBuilder(settings, config, memory, skills)
     agent_loop = AgentLoop(settings, db, llm, memory, tools, prompts, audit)
     tools.query_expander = agent_loop.expand_query_with_lite
@@ -348,6 +494,7 @@ def build_services(settings: Settings) -> Services:
         backup,
         guardrail,
         cron_scheduler,
+        mcp,
     )
 
 
@@ -377,6 +524,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services = build_services(settings)
         app.state.settings = settings
         app.state.services = services
+        await services.mcp.reload()
         warning = backup_warning(settings, services.backup)
         if warning:
             log_event("warning", "backup_warning", warning=warning)
@@ -410,6 +558,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             backup_task.cancel()
         if polling_task:
             polling_task.cancel()
+        await services.mcp.shutdown()
 
     app = FastAPI(title="Quéo Solution Agent", version=__version__, lifespan=lifespan)
 
@@ -484,24 +633,142 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "skills": len(services.skills.list_enabled()),
             "workflows": len(services.workflow_registry.list_enabled()),
             "runs": len(services.workflows.tasks),
+            "mcp_servers": len(services.mcp.list_servers()),
             "admin_ui": "deferred",
         }
+
+    @app.get("/admin/api/mcp/servers", dependencies=[Depends(require_admin_auth)])
+    async def admin_mcp_servers(request: Request):
+        services: Services = request.app.state.services
+        return {"status": "success", "servers": [serialize_mcp_server(item) for item in services.mcp.list_servers()]}
+
+    @app.post("/admin/api/mcp/servers", dependencies=[Depends(require_admin_operator)])
+    async def admin_mcp_create_server(request: Request, body: McpServerCreate):
+        services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
+        config = mcp_config_from_payload(body)
+        try:
+            services.mcp.upsert_server(config, actor)
+            services.audit.record(actor, "mcp_server_upsert", config.server_id, {"enabled": config.enabled, "transport": config.transport})
+            await services.mcp.reload()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:300]) from exc
+        saved = services.mcp.get_server(config.server_id)
+        if not saved:
+            raise HTTPException(status_code=500, detail="MCP server was not saved")
+        return {"status": "success", "server": serialize_mcp_server(saved)}
+
+    @app.patch("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_operator)])
+    async def admin_mcp_patch_server(request: Request, server_id: str, body: McpServerUpdate):
+        services: Services = request.app.state.services
+        existing = services.mcp.get_server(server_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        data = body.model_dump(exclude_unset=True)
+        merged = McpServerCreate(
+            server_id=server_id,
+            name=str(data.get("name", existing.name)),
+            prefix=str(data.get("prefix", existing.prefix)),
+            transport=str(data.get("transport", existing.transport)),
+            command=data.get("command", existing.command),
+            args=data.get("args", existing.args),
+            base_url=data.get("base_url", existing.base_url),
+            env_public=data.get("env_public", existing.env_public),
+            enabled=bool(data.get("enabled", existing.enabled)),
+        )
+        actor = auth_actor(request, "admin-api")
+        config = mcp_config_from_payload(merged)
+        try:
+            services.mcp.upsert_server(config, actor)
+            services.audit.record(actor, "mcp_server_update", server_id, {key: value for key, value in data.items() if key != "env_public"})
+            await services.mcp.reload()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=str(exc)[:300]) from exc
+        saved = services.mcp.get_server(server_id)
+        if not saved:
+            raise HTTPException(status_code=500, detail="MCP server was not saved")
+        return {"status": "success", "server": serialize_mcp_server(saved)}
+
+    @app.delete("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_operator)])
+    async def admin_mcp_delete_server(request: Request, server_id: str):
+        services: Services = request.app.state.services
+        if not services.mcp.get_server(server_id):
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        actor = auth_actor(request, "admin-api")
+        services.mcp.delete_server(server_id)
+        services.audit.record(actor, "mcp_server_delete", server_id, {})
+        await services.mcp.reload()
+        return {"status": "success"}
+
+    @app.put("/admin/api/mcp/servers/{server_id}/secret", dependencies=[Depends(require_admin_operator)])
+    async def admin_mcp_set_secret(request: Request, server_id: str, body: McpSecretUpdate):
+        services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
+        if not body.value:
+            raise HTTPException(status_code=400, detail="secret value is required")
+        try:
+            services.mcp.set_secret(server_id, body.secret_key, body.value)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="MCP server not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Unable to store MCP secret: {str(exc)[:160]}") from exc
+        services.audit.record(actor, "mcp_secret_update", server_id, {"secret_key": body.secret_key})
+        await services.mcp.reload()
+        return {"status": "success", "server_id": server_id, "secret_key": body.secret_key}
+
+    @app.post("/admin/api/mcp/servers/{server_id}/test", dependencies=[Depends(require_admin_operator)])
+    async def admin_mcp_test_server(request: Request, server_id: str):
+        services: Services = request.app.state.services
+        result = await services.mcp.test_server(server_id)
+        services.audit.record(auth_actor(request, "admin-api"), "mcp_server_test", server_id, {"status": result.get("status"), "tool_count": result.get("tool_count")})
+        return {"status": "success", "result": result}
+
+    @app.get("/admin/api/mcp/servers/{server_id}/tools", dependencies=[Depends(require_admin_auth)])
+    async def admin_mcp_server_tools(request: Request, server_id: str):
+        services: Services = request.app.state.services
+        if not services.mcp.get_server(server_id):
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        return {"status": "success", "server_id": server_id, "tools": services.mcp.loaded_tools(server_id)}
 
     @app.get("/admin/api/instructions", dependencies=[Depends(require_admin_auth)])
     async def get_instructions(request: Request, name: str = "persona"):
         services: Services = request.app.state.services
         with services.db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, version, active, created_at, created_by FROM instructions WHERE name=? ORDER BY version DESC",
+                "SELECT id, name, content, version, active, created_at, created_by FROM instructions WHERE name=? ORDER BY version DESC",
                 (name,),
             ).fetchall()
-        return {"status": "success", "instructions": [dict(row) for row in rows]}
+        
+        instructions_list = [dict(row) for row in rows]
+        active_content = ""
+        for item in instructions_list:
+            if item.get("active"):
+                active_content = item.get("content", "")
+                break
+        if not active_content and instructions_list:
+            active_content = instructions_list[0].get("content", "")
+            
+        return {
+            "status": "success",
+            "instructions": instructions_list,
+            "content": active_content,
+            "active_content": active_content,
+        }
 
     @app.post("/admin/api/instructions", dependencies=[Depends(require_admin_operator)])
     async def set_instruction(request: Request, body: InstructionRequest):
         services: Services = request.app.state.services
         actor = auth_actor(request, "admin-api")
-        instruction_id = services.config.set_instruction(body.name, body.content, actor)
+        content = body.content or body.instructions
+        if not content:
+            raise HTTPException(status_code=400, detail="content or instructions is required")
+        instruction_id = services.config.set_instruction(body.name, content, actor)
         services.audit.record(actor, "instruction_update", body.name, {"id": instruction_id})
         bump_registry_and_sync(services, actor)
         return {"status": "success", "id": instruction_id}
@@ -715,6 +982,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bump_registry_and_sync(services, actor)
         return {"status": "success"}
 
+    @app.post("/admin/api/kb/clear", dependencies=[Depends(require_admin_operator)])
+    async def admin_kb_clear(request: Request):
+        services: Services = request.app.state.services
+        actor = auth_actor(request, "admin-api")
+        services.kb.clear_all()
+        bump_registry_and_sync(services, actor)
+        return {"status": "success", "message": "Knowledge base cleared successfully"}
+
     @app.post("/admin/api/kb/search-test", dependencies=[Depends(require_admin_auth)])
     async def admin_kb_search(request: Request, body: dict[str, Any]):
         services: Services = request.app.state.services
@@ -867,6 +1142,104 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services: Services = request.app.state.services
         return {"status": "success", "answers": services.audit.answers(limit, user_id=user_id, session_id=session_id)}
 
+    @app.get("/admin/api/usage", dependencies=[Depends(require_admin_auth)])
+    async def admin_usage(request: Request):
+        """LLM usage analytics aggregated from llm_calls: requests, tokens, cost (per model_pricing)."""
+        services: Services = request.app.state.services
+        qp = request.query_params
+        # Default window: last 30 days. created_at is ISO like 2026-06-15T18:00:39Z.
+        to_raw = (qp.get("to") or "").strip()
+        from_raw = (qp.get("from") or "").strip()
+        bucket = (qp.get("bucket") or "day").strip().lower()
+        if bucket not in ("day", "hour"):
+            bucket = "day"
+        to_dt = utc_now() if not to_raw else to_raw
+        if not from_raw:
+            from datetime import datetime, timedelta, timezone
+            from_dt = (datetime.now(timezone.utc) - timedelta(days=30)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        else:
+            from_dt = from_raw
+        bucket_len = 10 if bucket == "day" else 13  # YYYY-MM-DD or YYYY-MM-DDTHH
+
+        pricing = resolve_model_pricing(services)
+
+        def cost_of(model: str, p_tok: int, c_tok: int) -> float | None:
+            rate = pricing.get(model)
+            if not rate:
+                return None
+            return round(p_tok / 1_000_000 * rate.get("input_per_1m", 0.0)
+                         + c_tok / 1_000_000 * rate.get("output_per_1m", 0.0), 6)
+
+        with services.db.connect() as conn:
+            where = "WHERE created_at >= ? AND created_at <= ?"
+            args = (from_dt, to_dt)
+            totals_row = conn.execute(
+                f"SELECT COUNT(*) reqs, COALESCE(SUM(prompt_tokens),0) pt, COALESCE(SUM(completion_tokens),0) ct, "
+                f"COALESCE(SUM(latency_ms),0) lat FROM llm_calls {where}", args).fetchone()
+            by_model_rows = conn.execute(
+                f"SELECT COALESCE(model,'(unknown)') model, COUNT(*) reqs, COALESCE(SUM(prompt_tokens),0) pt, "
+                f"COALESCE(SUM(completion_tokens),0) ct FROM llm_calls {where} GROUP BY model ORDER BY reqs DESC", args).fetchall()
+            by_purpose_rows = conn.execute(
+                f"SELECT COALESCE(purpose,'(none)') purpose, COUNT(*) reqs, COALESCE(SUM(prompt_tokens),0) pt, "
+                f"COALESCE(SUM(completion_tokens),0) ct FROM llm_calls {where} GROUP BY purpose ORDER BY reqs DESC", args).fetchall()
+            series_rows = conn.execute(
+                f"SELECT substr(created_at,1,?) b, COALESCE(model,'(unknown)') model, COUNT(*) reqs, "
+                f"COALESCE(SUM(prompt_tokens),0) pt, COALESCE(SUM(completion_tokens),0) ct "
+                f"FROM llm_calls {where} GROUP BY b, model ORDER BY b", (bucket_len,) + args).fetchall()
+
+        by_model = []
+        total_cost = 0.0
+        any_priced = False
+        for r in by_model_rows:
+            c = cost_of(r["model"], r["pt"], r["ct"])
+            if c is not None:
+                total_cost += c
+                any_priced = True
+            by_model.append({
+                "model": r["model"], "requests": r["reqs"],
+                "prompt_tokens": r["pt"], "completion_tokens": r["ct"],
+                "total_tokens": r["pt"] + r["ct"], "cost_usd": c,
+                "priced": c is not None,
+            })
+
+        # Time-series: bucket → {requests, prompt_tokens, completion_tokens, cost_usd}
+        series_map: dict[str, dict[str, Any]] = {}
+        for r in series_rows:
+            b = r["b"]
+            slot = series_map.setdefault(b, {"bucket": b, "requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "_has_cost": False})
+            slot["requests"] += r["reqs"]
+            slot["prompt_tokens"] += r["pt"]
+            slot["completion_tokens"] += r["ct"]
+            c = cost_of(r["model"], r["pt"], r["ct"])
+            if c is not None:
+                slot["cost_usd"] += c
+                slot["_has_cost"] = True
+        series = []
+        for b in sorted(series_map):
+            slot = series_map[b]
+            slot["cost_usd"] = round(slot["cost_usd"], 6) if slot.pop("_has_cost") else None
+            series.append(slot)
+
+        by_purpose = [{"purpose": r["purpose"], "requests": r["reqs"],
+                       "total_tokens": r["pt"] + r["ct"]} for r in by_purpose_rows]
+
+        pt, ct = totals_row["pt"], totals_row["ct"]
+        return {
+            "status": "success",
+            "range": {"from": from_dt, "to": to_dt, "bucket": bucket},
+            "totals": {
+                "requests": totals_row["reqs"],
+                "prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
+                "avg_latency_ms": round(totals_row["lat"] / totals_row["reqs"]) if totals_row["reqs"] else 0,
+                "cost_usd": round(total_cost, 6) if any_priced else None,
+            },
+            "by_model": by_model,
+            "by_purpose": by_purpose,
+            "series": series,
+            "pricing": pricing,
+            "currency": "USD",
+        }
+
     @app.get("/admin/api/settings", dependencies=[Depends(require_admin_auth)])
     async def admin_get_settings(request: Request):
         services: Services = request.app.state.services
@@ -885,6 +1258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "kb_sync_activate",
             "workflow_enabled",
             "model_routing",
+            "model_pricing",
             "registry_version",
             "rate_limit_per_minute",
             "rate_limit_per_day",
@@ -893,6 +1267,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for key, value in values.items():
             if key not in allowed:
                 raise HTTPException(status_code=400, detail=f"Setting is not writable: {key}")
+            if key == "model_pricing":
+                validate_model_pricing(value)
             if key == "model_routing":
                 validate_model_routing(services, value)
             val = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)

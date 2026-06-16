@@ -340,6 +340,22 @@ class ApiTests(unittest.TestCase):
                         # The HTTP request is accepted (200 OK)
                         self.assertEqual(resp_ok.status_code, 200)
 
+                        # Verify we can clear the KB
+                        admin_operator_headers = {
+                            "Authorization": "Bearer admin-token",
+                            "X-Acting-User": "duy",
+                            "X-Acting-Role": "operator",
+                        }
+                        clear_resp = await client.post("/admin/api/kb/clear", headers=admin_operator_headers)
+                        self.assertEqual(clear_resp.status_code, 200)
+                        self.assertEqual(clear_resp.json()["status"], "success")
+                        
+                        # Verify it is now empty in status API
+                        status_resp = await client.get("/admin/api/status", headers=admin_operator_headers)
+                        self.assertEqual(status_resp.status_code, 200)
+                        self.assertIsNone(status_resp.json()["kb"]["kb_version"])
+                        self.assertFalse(status_resp.json()["kb"]["available"])
+
         asyncio.run(run())
 
 

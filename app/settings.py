@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     kb_read_max_chars: int = Field(12000, alias="KB_READ_MAX_CHARS")
     max_history_messages: int = Field(18, alias="MAX_HISTORY_MESSAGES")
 
+    mcp_enabled: bool = Field(True, alias="MCP_ENABLED")
+    mcp_secret_key: str = Field("", alias="MCP_SECRET_KEY")
+    mcp_call_timeout_seconds: int = Field(60, alias="MCP_CALL_TIMEOUT_SECONDS")
+
     telegram_mode: str = Field("webhook", alias="TELEGRAM_MODE")
     telegram_bot_token: str = Field("", alias="TELEGRAM_BOT_TOKEN")
     telegram_webhook_secret: str = Field("", alias="TELEGRAM_WEBHOOK_SECRET")
@@ -133,6 +137,8 @@ class Settings(BaseSettings):
             missing.append("AGENT_ADMIN_TOKEN>=32chars")
         if self.telegram_webhook_secret and len(self.telegram_webhook_secret) < 32:
             missing.append("TELEGRAM_WEBHOOK_SECRET>=32chars")
+        if self.mcp_enabled and len(self.mcp_secret_key) < 32:
+            missing.append("MCP_SECRET_KEY>=32chars")
         if missing:
             raise ValueError("Missing/weak production config: " + ", ".join(missing))
         return self

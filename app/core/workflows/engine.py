@@ -104,7 +104,11 @@ class WorkflowEngine:
                     state["outputs"].append({"step": idx, "summary": reply.text[:2000], "citations": reply.citations})
                     self._append_log(run_id, {"step": idx, "status": "done", "summary": reply.text[:1000], "citations": reply.citations})
                 report = await self._write_report(run_id, workflow_id, spec, state, dedupe(all_citations))
-                self._finish(run_id, "succeeded", [report])
+                artifacts = [report]
+                pdf_report = self._write_pdf_report(run_id)
+                if pdf_report:
+                    artifacts.append(pdf_report)
+                self._finish(run_id, "succeeded", artifacts)
                 if reply_handle:
                     await reply_handle.send_text(f"Workflow #{run_id} hoàn tất.")
                     await reply_handle.send_document(str(self.settings.artifacts_dir / str(run_id) / "report.md"), "Báo cáo workflow")
@@ -219,3 +223,88 @@ class WorkflowEngine:
 
         path.write_text(content, encoding="utf-8")
         return f"artifacts/{run_id}/report.md"
+
+    def _write_pdf_report(self, run_id: int) -> str | None:
+        directory = self.settings.artifacts_dir / str(run_id)
+        markdown_path = directory / "report.md"
+        pdf_path = directory / "report.pdf"
+        if not markdown_path.exists():
+            return None
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        except Exception:
+            return None
+
+        font_name = _register_pdf_font()
+        styles = getSampleStyleSheet()
+        for style in styles.byName.values():
+            style.fontName = font_name
+            style.leading = max(style.leading, style.fontSize + 4)
+        styles["Title"].fontName = font_name
+        styles["Heading1"].fontName = font_name
+        styles["Heading2"].fontName = font_name
+
+        doc = SimpleDocTemplate(
+            str(pdf_path),
+            pagesize=A4,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36,
+            title=f"Workflow report #{run_id}",
+        )
+        story = []
+        for raw_line in markdown_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line:
+                story.append(Spacer(1, 8))
+                continue
+            style_name = "BodyText"
+            if line.startswith("# "):
+                style_name = "Title"
+                line = line[2:].strip()
+            elif line.startswith("## "):
+                style_name = "Heading1"
+                line = line[3:].strip()
+            elif line.startswith("### "):
+                style_name = "Heading2"
+                line = line[4:].strip()
+            elif line.startswith("- "):
+                line = f"• {line[2:].strip()}"
+            story.append(Paragraph(_escape_pdf_text(line), styles[style_name]))
+        doc.build(story)
+        return f"artifacts/{run_id}/report.pdf"
+
+
+def _register_pdf_font() -> str:
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+
+        candidates = [
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        for path in candidates:
+            if Path(path).exists():
+                pdfmetrics.registerFont(TTFont("DidiSans", path))
+                return "DidiSans"
+    except Exception:
+        pass
+    return "Helvetica"
+
+
+def _escape_pdf_text(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("**", "")
+        .replace("__", "")
+    )

@@ -86,3 +86,5 @@
 | **MaaS** | GreenNode Model-as-a-Service, endpoint OpenAI-compatible |
 | **AgentBase** | Nền tảng runtime của GreenNode để host container agent |
 | **STATE_DIR** | Thư mục dữ liệu bền của container (mặc định `/data`) |
+
+

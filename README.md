@@ -23,6 +23,34 @@ Index a KB folder:
 python -m app.cli index-kb --source "/path/to/Wealth Solution" --activate
 ```
 
+## Knowledge Auto-sync
+
+Local auto-sync is configured with a private env file plus a YAML source map:
+
+- `~/.queo-sync.env`: endpoint, sync key, and local runtime paths. Keep this file `chmod 600`.
+- `~/.queo-sync.yaml`: one or more sync sources. Each source can run manually, on an interval, and/or through folder watch events.
+- `config/queo-sync.example.yaml`: committed example for adding more sources.
+
+Useful commands:
+
+```bash
+# List configured sources
+set -a; source ~/.queo-sync.env; set +a
+python scripts/queo_sync.py --config ~/.queo-sync.yaml --list-sources
+
+# Manual trigger for one source
+python scripts/queo_sync.py --config ~/.queo-sync.yaml --source wealth_knowledge --once
+
+# Dry-run without uploading
+python scripts/queo_sync.py --config ~/.queo-sync.yaml --source wealth_knowledge --once --dry-run
+
+# Run watch + interval sources continuously
+python scripts/queo_sync.py --config ~/.queo-sync.yaml --serve
+```
+
+For a source rooted at `.../05. Knowledge`, set `prefix: 05. Knowledge` so files are uploaded as
+`05. Knowledge/<Product>/...` and the agent can classify `area=knowledge` plus the corresponding product.
+
 Chat locally through the core loop:
 
 ```bash
