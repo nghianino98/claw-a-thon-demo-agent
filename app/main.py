@@ -524,6 +524,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services = build_services(settings)
         app.state.settings = settings
         app.state.services = services
+
+        # Seed KB from the image-baked archive when state is empty (no S3/creds needed).
+        # /data is ephemeral on this platform, so a cold boot has no active KB version;
+        # indexing is local (BM25/FTS, no embedding API) so re-seeding each boot is cheap.
+        # Skipped automatically if a version already exists (e.g. restored from S3 or live-synced).
+        try:
+            if settings.kb_seed_zip.is_file() and services.kb.active_version() is None:
+                log_event("info", "kb_seed_started", seed=str(settings.kb_seed_zip))
+                loop = asyncio.get_event_loop()
+                seed_version = await loop.run_in_executor(
+                    None,
+                    lambda: services.kb.build_from_zip(
+                        settings.kb_seed_zip, uploaded_by="system-seed", activate=True
+                    ),
+                )
+                log_event("info", "kb_seed_succeeded", version_id=seed_version)
+        except Exception as exc:
+            log_event("error", "kb_seed_failed", error=str(exc))
+
         await services.mcp.reload()
         warning = backup_warning(settings, services.backup)
         if warning:

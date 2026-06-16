@@ -283,6 +283,7 @@ class ApiTests(unittest.TestCase):
                     SYNC_API_KEY="sync-key",
                     TELEGRAM_OWNER_USER_IDS="100",
                     TELEGRAM_MODE="webhook",
+                    KB_SEED_ZIP="",  # disable boot-seed; this test manages kb_versions ids manually
                 )
                 app = create_app(settings)
                 transport = httpx.ASGITransport(app=app)

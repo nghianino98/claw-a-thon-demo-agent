@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     kb_source_dir: str = Field("", alias="KB_SOURCE_DIR")
     kb_sync_activate: str = Field("auto", alias="KB_SYNC_ACTIVATE")
     sync_api_key: str = Field("", alias="SYNC_API_KEY")
+    kb_seed_zip: Path = Field(Path("seed/kb-seed.zip"), alias="KB_SEED_ZIP")
 
     artifact_retention_days: int = Field(14, alias="ARTIFACT_RETENTION_DAYS")
 

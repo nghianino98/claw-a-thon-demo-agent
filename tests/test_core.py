@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -1440,6 +1441,36 @@ class BackupAndDeltaTests(unittest.TestCase):
 
             asyncio.run(scheduler._run_workflow("daily_report"))
             self.assertEqual(engine.started[0], ("daily_report", "", "schedule", "scheduler"))
+
+
+class KBSeedTests(unittest.TestCase):
+    """Image-baked KB seed used by the boot-seed path in app.main when /data is empty."""
+
+    SEED_ZIP = Path(__file__).resolve().parent.parent / "seed" / "kb-seed.zip"
+
+    def test_seed_zip_present_and_valid(self) -> None:
+        self.assertTrue(self.SEED_ZIP.exists(), f"missing baked seed at {self.SEED_ZIP}")
+        self.assertTrue(zipfile.is_zipfile(self.SEED_ZIP))
+
+    def test_default_seed_path_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings = make_settings(Path(tmpdir))
+            self.assertEqual(settings.kb_seed_zip, Path("seed/kb-seed.zip"))
+
+    def test_build_from_seed_activates_version(self) -> None:
+        # Mirrors the boot-seed logic: empty state -> build_from_zip(seed) -> active version.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            settings = make_settings(tmp / "state")
+            db = Database(settings.db_path)
+            run_migrations(db)
+
+            kb = KBService(db, settings)
+            self.assertIsNone(kb.active_version())
+
+            version_id = kb.build_from_zip(self.SEED_ZIP, uploaded_by="system-seed", activate=True)
+            self.assertEqual(kb.active_version(), version_id)
+            self.assertTrue((kb.versions_dir / str(version_id)).exists())
 
 
 if __name__ == "__main__":

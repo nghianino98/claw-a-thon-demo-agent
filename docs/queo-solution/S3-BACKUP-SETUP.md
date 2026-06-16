@@ -1,7 +1,43 @@
-# Quéo Agent — S3 Backup Setup (chống mất KB khi `/data` bị wipe)
+# Quéo Agent — Chống mất KB khi `/data` bị wipe
 
-> Mục tiêu: KB + SQLite state **không bị mất** mỗi khi platform redeploy/restart container.
-> Code backup/restore **đã sẵn sàng** (`app/services/backup.py` + wiring trong `app/main.py`) — chỉ thiếu **cấu hình S3 credentials** trên runtime.
+> Mục tiêu: KB **không bị mất** mỗi khi platform redeploy/restart container (`/data` là ephemeral, không có volume bền).
+
+## Hai cơ chế (bổ sung cho nhau)
+
+| Cơ chế | Cần creds? | Giữ được gì | Khi nào dùng |
+|---|---|---|---|
+| **A. Boot-seed từ image** (đã bật mặc định) | KHÔNG | Chỉ KB (`05. Knowledge`) | Floor an toàn — KB luôn sống lại sau restart |
+| **B. S3 backup/restore** (cần cấu hình) | Có (S3) | KB **+** DB state (usage history, MCP servers, settings) | Khi muốn giữ cả state động, không chỉ KB |
+
+> Hiện đang chạy **chỉ cơ chế A** (không có S3 creds). Phần dưới mô tả cả hai.
+
+---
+
+## A. Boot-seed từ image (KHÔNG cần creds — đang dùng)
+
+KB (`05. Knowledge`) được **nướng sẵn vào Docker image** tại `seed/kb-seed.zip`. Lúc container khởi động, nếu `/data` trống (chưa có KB active), agent **tự động `build_from_zip` + activate** từ file seed này. Indexing là BM25/FTS local (không gọi embedding API) nên re-seed mỗi boot rất nhanh và không tốn token.
+
+- Code: `app/main.py` (lifespan, sau `build_services`) + setting `KB_SEED_ZIP` (mặc định `seed/kb-seed.zip`).
+- Tự bỏ qua nếu đã có KB active (vd vừa restore từ S3 hoặc live-sync) → không ghi đè.
+
+### Cách cập nhật KB đã nướng (khi `05. Knowledge` đổi)
+
+```bash
+# 1. Pack lại 05. Knowledge thành seed zip (cấu trúc: "05. Knowledge/...")
+python scripts/pack_kb.py --source "<đường dẫn>/Wealth Solution/05. Knowlege" --out seed/kb-seed.zip
+#    (hoặc copy zip đã pack: cp <packed>.zip seed/kb-seed.zip)
+
+# 2. Commit seed mới + rebuild & push image, rồi runtime.sh update như thường lệ
+git add seed/kb-seed.zip && git commit -m "Update baked KB seed"
+```
+
+> Đánh đổi: cập nhật KB phải rebuild image. Live delta-sync vẫn patch được instance đang chạy (tồn tại tới lần restart kế, sau đó boot-seed nạp lại bản trong image).
+
+---
+
+## B. S3 Backup/Restore (cần creds — chưa bật)
+
+Code backup/restore **đã sẵn sàng** (`app/services/backup.py` + wiring trong `app/main.py`) — chỉ thiếu **cấu hình S3 credentials** trên runtime. Bật cơ chế này nếu muốn giữ cả DB state (không chỉ KB).
 
 ---
 
