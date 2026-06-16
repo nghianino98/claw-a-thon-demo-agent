@@ -33,8 +33,43 @@ export function AuthWrapper({ children }: { children: React.ReactNode }) {
       }
     } else {
       // Authenticated, 2FA enabled, password changed
-      if (pathname === "/login" || pathname === "/change-password" || pathname === "/setup-2fa" || pathname === "/") {
-        router.replace("/knowledge-base");
+      const isSuperAdmin = user?.role === "superadmin";
+      const allowedMenus = user?.menuPermissions || [];
+      const CONFIGURABLE_MENUS = [
+        "/settings/mcp",
+        "/settings",
+        "/knowledge-base",
+        "/history",
+        "/workflows",
+        "/agent-admin/dashboard",
+        "/agent-admin/agent-connects",
+        "/agent-admin/bot-management",
+        "/agent-admin/instructions",
+        "/agent-admin/skills",
+        "/agent-admin/knowledge"
+      ];
+      const sortedMenus = [...CONFIGURABLE_MENUS].sort((a, b) => b.length - a.length);
+
+      const isRestrictedMenu = (() => {
+        if (isSuperAdmin) return false;
+
+        if (pathname === "/accounts" || pathname.startsWith("/accounts/")) {
+          return true;
+        }
+
+        const matchingMenu = sortedMenus.find(menu => pathname === menu || pathname.startsWith(menu + "/"));
+        if (matchingMenu) {
+          return !allowedMenus.includes(matchingMenu);
+        }
+        return false;
+      })();
+
+      if (isRestrictedMenu) {
+        const fallbackPath = allowedMenus[0] || "/login";
+        router.replace(fallbackPath);
+      } else if (pathname === "/login" || pathname === "/change-password" || pathname === "/setup-2fa" || pathname === "/") {
+        const fallbackPath = isSuperAdmin ? "/knowledge-base" : (allowedMenus[0] || "/login");
+        router.replace(fallbackPath);
       }
     }
   }, [status, authMode, authenticated, user, pathname, router]);

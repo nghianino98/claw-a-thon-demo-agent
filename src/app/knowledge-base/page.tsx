@@ -381,11 +381,13 @@ function SortableTaskCard({
 }
 
 export default function KnowledgeBasePage() {
-    const { defaults } = useSettingsStore();
+    const { getDefaults } = useSettingsStore();
     const { language } = useI18nStore();
     const t = useTranslation();
 
     const { authMode, user } = useAuth();
+    const defaults = getDefaults(user?.username || 'local');
+    const tasksStorageKey = user?.username ? `kb_tasks_${user.username}` : "kb_tasks";
     const [userCredentials, setUserCredentials] = useState<any[]>([]);
     const [selectedCredRef, setSelectedCredRef] = useState<{ source: string; label: string } | null>(null);
 
@@ -639,7 +641,7 @@ export default function KnowledgeBasePage() {
                 const oldIndex = items.findIndex((i) => i.id === active.id);
                 const newIndex = items.findIndex((i) => i.id === over.id);
                 const newTasks = arrayMove(items, oldIndex, newIndex);
-                localStorage.setItem("kb_tasks", JSON.stringify(newTasks));
+                localStorage.setItem(tasksStorageKey, JSON.stringify(newTasks));
                 fetch('/api/knowledge-base/tasks', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -662,10 +664,10 @@ export default function KnowledgeBasePage() {
             .then(data => {
                 if (data.tasks && data.tasks.length > 0) {
                     setTasks(data.tasks);
-                    localStorage.setItem("kb_tasks", JSON.stringify(data.tasks));
+                    localStorage.setItem(tasksStorageKey, JSON.stringify(data.tasks));
                 } else {
                     // Fallback to local storage if API is empty
-                    const savedTasks = localStorage.getItem("kb_tasks");
+                    const savedTasks = localStorage.getItem(tasksStorageKey);
                     if (savedTasks) {
                         try {
                             const parsed = JSON.parse(savedTasks);
@@ -722,7 +724,7 @@ export default function KnowledgeBasePage() {
         }
 
         setTasks(updatedTasks);
-        localStorage.setItem("kb_tasks", JSON.stringify(updatedTasks));
+        localStorage.setItem(tasksStorageKey, JSON.stringify(updatedTasks));
 
         const csrfToken = useAuthStore.getState().csrfToken;
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -744,7 +746,7 @@ export default function KnowledgeBasePage() {
         if (confirm("Bạn có chắc chắn muốn xoá tác vụ này không?")) {
             const updatedTasks = tasks.filter(t => t.id !== taskId);
             setTasks(updatedTasks);
-            localStorage.setItem("kb_tasks", JSON.stringify(updatedTasks));
+            localStorage.setItem(tasksStorageKey, JSON.stringify(updatedTasks));
 
             const isRequired = authMode === "required";
             const csrfToken = useAuthStore.getState().csrfToken;
@@ -1080,7 +1082,7 @@ export default function KnowledgeBasePage() {
                                         const newTasks = prevTasks.map(t => 
                                             t.id === selectedTaskId ? { ...t, lastSyncTime: now } : t
                                         );
-                                        localStorage.setItem("kb_tasks", JSON.stringify(newTasks));
+                                        localStorage.setItem(tasksStorageKey, JSON.stringify(newTasks));
                                         // Sync to backend
                                         fetch('/api/knowledge-base/tasks', {
                                             method: 'POST',

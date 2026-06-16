@@ -34,7 +34,8 @@ async function handler(
     }
   }
 
-  const connection = getAgentConnectionWithSecrets(id);
+  const filterUserId = auth.role === "superadmin" ? null : auth.userId;
+  const connection = getAgentConnectionWithSecrets(id, filterUserId);
   if (!connection || !connection.enabled) {
     return NextResponse.json({ error: "agent_connection_not_found" }, { status: 404 });
   }

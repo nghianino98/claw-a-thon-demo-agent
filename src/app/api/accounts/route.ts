@@ -7,6 +7,7 @@ import { getDb } from "@/lib/db";
 import { isRole } from "@/lib/rbac/roles";
 import type { Role } from "@/lib/rbac/roles";
 import { now } from "@/lib/time";
+import { DEFAULT_MENUS } from "@/lib/auth/session";
 
 export const runtime = "nodejs";
 
@@ -24,9 +25,18 @@ type AdminUserRecord = {
   created_by: string | null;
   created_at: number;
   updated_at: number;
+  menu_permissions?: string | null;
 };
 
 function publicUser(row: AdminUserRecord) {
+  let parsedPermissions: string[] = DEFAULT_MENUS;
+  if (row.menu_permissions !== null && row.menu_permissions !== undefined) {
+    try {
+      parsedPermissions = JSON.parse(row.menu_permissions);
+    } catch (e) {
+      parsedPermissions = [];
+    }
+  }
   return {
     id: row.id,
     username: row.username,
@@ -41,6 +51,7 @@ function publicUser(row: AdminUserRecord) {
     createdBy: row.created_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    menuPermissions: parsedPermissions,
   };
 }
 
@@ -70,17 +81,24 @@ export async function POST(request: NextRequest) {
   if (!validatePasswordPolicy(password)) return NextResponse.json({ error: "password_policy" }, { status: 400 });
 
   const t = now();
+  let menuPermissionsVal: string | null = null;
+  if (body.menuPermissions && Array.isArray(body.menuPermissions)) {
+    const isValid = body.menuPermissions.every((item: unknown) => typeof item === "string");
+    if (!isValid) return NextResponse.json({ error: "invalid_menu_permissions" }, { status: 400 });
+    menuPermissionsVal = JSON.stringify(body.menuPermissions);
+  }
+
   try {
     const result = getDb()
       .prepare(
         `
         INSERT INTO admin_users (
           username, password_hash, role, status, must_change_password, failed_attempts,
-          created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, 'active', 1, 0, ?, ?, ?)
+          created_by, created_at, updated_at, menu_permissions
+        ) VALUES (?, ?, ?, 'active', 1, 0, ?, ?, ?, ?)
       `,
       )
-      .run(username, hashPasswordSync(password), role, gate.auth.username, t, t);
+      .run(username, hashPasswordSync(password), role, gate.auth.username, t, t, menuPermissionsVal);
     audit(auditActor(gate.auth.username), "account_create", username, { role });
     return NextResponse.json({
       success: true,
@@ -98,6 +116,7 @@ export async function POST(request: NextRequest) {
         created_by: gate.auth.username,
         created_at: t,
         updated_at: t,
+        menu_permissions: menuPermissionsVal,
       }),
       temporaryPassword: body.password ? undefined : password,
     });

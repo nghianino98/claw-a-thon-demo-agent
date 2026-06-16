@@ -33,9 +33,10 @@ export async function POST(req: NextRequest) {
   }
 
   const connectionId = bodyString(body, "agentConnectionId");
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
   const connection = connectionId
-    ? getAgentConnectionWithSecrets(connectionId)
-    : getDefaultAgentConnectionWithSecrets();
+    ? getAgentConnectionWithSecrets(connectionId, filterUserId)
+    : getDefaultAgentConnectionWithSecrets(filterUserId);
   if (!connection || !connection.enabled || !connection.apiKey) {
     return NextResponse.json(
       { error: "agent_not_configured", message: "Cần khai báo Agent Connect có Agent API key trong Didi." },

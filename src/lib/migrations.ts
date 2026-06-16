@@ -175,6 +175,34 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    id: "0004_user_isolation",
+    up(db) {
+      const hasAgentUserId = db.prepare("PRAGMA table_info(agent_connections)").all().some((col: any) => col.name === "user_id");
+      if (!hasAgentUserId) {
+        db.exec("ALTER TABLE agent_connections ADD COLUMN user_id INTEGER REFERENCES admin_users(id) ON DELETE CASCADE");
+      }
+      const hasBotUserId = db.prepare("PRAGMA table_info(bot_connections)").all().some((col: any) => col.name === "user_id");
+      if (!hasBotUserId) {
+        db.exec("ALTER TABLE bot_connections ADD COLUMN user_id INTEGER REFERENCES admin_users(id) ON DELETE CASCADE");
+      }
+
+      const firstAdmin = db.prepare("SELECT id FROM admin_users ORDER BY id ASC LIMIT 1").get() as { id: number } | undefined;
+      if (firstAdmin) {
+        db.prepare("UPDATE agent_connections SET user_id = ? WHERE user_id IS NULL").run(firstAdmin.id);
+        db.prepare("UPDATE bot_connections SET user_id = ? WHERE user_id IS NULL").run(firstAdmin.id);
+      }
+    },
+  },
+  {
+    id: "0005_menu_permissions",
+    up(db) {
+      const hasMenuPermissions = db.prepare("PRAGMA table_info(admin_users)").all().some((col: any) => col.name === "menu_permissions");
+      if (!hasMenuPermissions) {
+        db.exec("ALTER TABLE admin_users ADD COLUMN menu_permissions TEXT");
+      }
+    },
+  },
 ];
 
 function seedBootstrapUser(db: Database.Database) {

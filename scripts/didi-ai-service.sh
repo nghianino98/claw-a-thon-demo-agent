@@ -13,6 +13,7 @@ LOG_DIR="logs"
 PID_FILE="$DATA_DIR/app.pid"
 PORT_FILE="$DATA_DIR/app.port"
 DAEMON_PID_FILE="$DATA_DIR/syncDaemon.pid"
+WATCHDOG_PID_FILE="$DATA_DIR/watchdog.pid"
 BUILD_ID_FILE=".next/BUILD_ID"
 WARMUP_ROUTES=(
     "/"
@@ -46,8 +47,47 @@ find_pids_by_cwd_and_pattern() {
     PATTERN="$1"
     for PID in $(pgrep -f "$PATTERN" 2>/dev/null); do
         CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+        if [ "$CWD" = "$APP_DIR" ] || [[ "$CWD" == "$APP_DIR"/* ]]; then
+            echo "$PID"
+        fi
+    done
+}
+
+find_port_pids_by_cwd() {
+    for PID in $(lsof -t -iTCP:"$APP_PORT" -sTCP:LISTEN 2>/dev/null); do
+        CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
         if [ "$CWD" = "$APP_DIR" ]; then
             echo "$PID"
+        fi
+    done
+}
+
+stop_pid_tree() {
+    PID="$1"
+    if ! is_pid_alive "$PID"; then
+        return 0
+    fi
+
+    for CHILD_PID in $(pgrep -P "$PID" 2>/dev/null); do
+        stop_pid_tree "$CHILD_PID"
+    done
+
+    kill "$PID" 2>/dev/null || true
+}
+
+stop_pids() {
+    PIDS="$(printf "%s\n" "$@" | awk 'NF && !seen[$0]++')"
+    [ -z "$PIDS" ] && return 0
+
+    for PID in $PIDS; do
+        stop_pid_tree "$PID"
+    done
+
+    sleep 2
+
+    for PID in $PIDS; do
+        if is_pid_alive "$PID"; then
+            kill -9 "$PID" 2>/dev/null || true
         fi
     done
 }
@@ -110,6 +150,45 @@ start_sync_daemon() {
     echo $! > "$DAEMON_PID_FILE"
 }
 
+start_watchdog() {
+    if [ "$APP_MODE" != "production" ]; then
+        return 0
+    fi
+
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        WATCHDOG_PID="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)"
+        if is_pid_alive "$WATCHDOG_PID"; then
+            return 0
+        fi
+    fi
+
+    nohup env DIDI_APP_DIR="$APP_DIR" DIDI_AI_PORT="$APP_PORT" bash scripts/didi-ai-watchdog.sh >> "$LOG_DIR/watchdog.log" 2>&1 < /dev/null &
+    echo $! > "$WATCHDOG_PID_FILE"
+}
+
+replace_wrong_server_on_port() {
+    if [ "$APP_MODE" != "production" ]; then
+        return 0
+    fi
+
+    DEV_PIDS="$(
+        find_pids_by_cwd_and_pattern "npm run dev"
+        find_pids_by_cwd_and_pattern "next dev"
+        find_pids_by_cwd_and_pattern "node_modules/.bin/next dev"
+    )"
+
+    if [ -n "$DEV_PIDS" ]; then
+        echo "Detected dev server on port $APP_PORT. Stopping it so production can start."
+        stop_pids $DEV_PIDS $(find_port_pids_by_cwd)
+        return 0
+    fi
+
+    if [ -n "$(find_port_pids_by_cwd)" ] && ! is_didi_port; then
+        echo "Detected unhealthy app listener on port $APP_PORT. Stopping it so production can restart."
+        stop_pids $(find_port_pids_by_cwd)
+    fi
+}
+
 prepare_standalone_assets() {
     mkdir -p .next/standalone/.next
     rm -rf .next/standalone/.next/static
@@ -137,9 +216,12 @@ if [ ! -d "node_modules" ]; then
     npm install --legacy-peer-deps
 fi
 
+replace_wrong_server_on_port
+
 if is_didi_port; then
     echo "Didi AI Tool is already available at http://localhost:$APP_PORT"
     start_sync_daemon
+    start_watchdog
     warm_up_routes "$APP_PORT"
     while is_didi_port; do
         sleep 30
@@ -159,6 +241,7 @@ fi
 
 prepare_standalone_assets
 start_sync_daemon
+start_watchdog
 echo "$$" > "$PID_FILE"
 ( warm_after_ready "$APP_PORT" ) &
 exec env DIDI_APP_DIR="$APP_DIR" STATE_DIR="$APP_DIR/data" PORT="$APP_PORT" HOSTNAME="0.0.0.0" node .next/standalone/server.js

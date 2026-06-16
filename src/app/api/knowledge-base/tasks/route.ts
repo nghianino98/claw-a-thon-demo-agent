@@ -30,7 +30,13 @@ export async function GET(req: NextRequest) {
         await ensureDataDir();
         try {
             const data = await fs.readFile(TASKS_FILE_PATH, 'utf-8');
-            const tasks = JSON.parse(data);
+            let tasks = JSON.parse(data);
+            if (!Array.isArray(tasks)) tasks = [];
+
+            if (process.env.AUTH_MODE === 'required' && gate.auth.userId && gate.auth.role !== 'superadmin') {
+                tasks = tasks.filter((t: any) => t.createdByUserId === gate.auth.userId);
+            }
+
             const safeTasks = process.env.AUTH_MODE === 'required' ? tasks.map(maskTaskSecrets) : tasks;
             return NextResponse.json({ tasks: safeTasks });
         } catch (err: any) {
@@ -57,20 +63,40 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: 'Tasks must be an array' }, { status: 400 });
         }
 
-        const tasksToWrite = process.env.AUTH_MODE === 'required'
-            ? tasks.map((task) => ({
+        // Read existing tasks
+        let existingTasks = [];
+        try {
+            await ensureDataDir();
+            const existingData = await fs.readFile(TASKS_FILE_PATH, 'utf-8');
+            existingTasks = JSON.parse(existingData);
+            if (!Array.isArray(existingTasks)) existingTasks = [];
+        } catch (err: any) {
+            if (err.code !== 'ENOENT') throw err;
+        }
+
+        const isRequired = process.env.AUTH_MODE === 'required';
+        const userId = gate.auth.userId;
+
+        const otherUsersTasks = isRequired && userId && gate.auth.role !== 'superadmin'
+            ? existingTasks.filter((t: any) => t.createdByUserId !== userId)
+            : [];
+
+        const userTasksToWrite = isRequired && userId
+            ? tasks.map((task: any) => ({
                 ...task,
                 apiKey: '',
-                createdByUserId: task.createdByUserId || gate.auth.userId,
-                scheduleOwnerUserId: task.isAutoSync ? (task.scheduleOwnerUserId || gate.auth.userId) : task.scheduleOwnerUserId,
+                createdByUserId: task.createdByUserId || userId,
+                scheduleOwnerUserId: task.isAutoSync ? (task.scheduleOwnerUserId || userId) : task.scheduleOwnerUserId,
             }))
             : tasks;
 
+        const tasksToWrite = [...otherUsersTasks, ...userTasksToWrite];
+
         await ensureDataDir();
         await fs.writeFile(TASKS_FILE_PATH, JSON.stringify(tasksToWrite, null, 2), 'utf-8');
-        audit(auditActor(gate.auth.username), 'tasks_write', 'data/tasks.json', { count: tasksToWrite.length });
+        audit(auditActor(gate.auth.username), 'tasks_write', 'data/tasks.json', { count: userTasksToWrite.length });
 
-        return NextResponse.json({ success: true, count: tasksToWrite.length });
+        return NextResponse.json({ success: true, count: userTasksToWrite.length });
     } catch (error: any) {
         return NextResponse.json({ error: error.message }, { status: 500 });
     }

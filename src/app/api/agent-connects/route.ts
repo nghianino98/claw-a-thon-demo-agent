@@ -33,7 +33,8 @@ export async function GET(request: NextRequest) {
   const gate = requireDidiAccess(request, "viewer", { action: "agent_connections_list" });
   if (!gate.ok) return gate.response;
 
-  return NextResponse.json({ connections: listAgentConnections() });
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  return NextResponse.json({ connections: listAgentConnections(filterUserId) });
 }
 
 export async function POST(request: NextRequest) {
@@ -77,14 +78,14 @@ export async function POST(request: NextRequest) {
         `
         INSERT INTO agent_connections (
           id, name, base_url, api_key_encrypted, admin_token_encrypted,
-          enabled, is_default, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?)
+          enabled, is_default, status, created_at, updated_at, user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)
       `,
       )
-      .run(id, name, baseUrl, apiKeyEncrypted, adminTokenEncrypted, enabled ? 1 : 0, isDefault ? 1 : 0, t, t);
-    if (isDefault) markOnlyDefault(id);
+      .run(id, name, baseUrl, apiKeyEncrypted, adminTokenEncrypted, enabled ? 1 : 0, isDefault ? 1 : 0, t, t, gate.auth.userId);
+    if (isDefault) markOnlyDefault(id, gate.auth.role === "superadmin" ? null : gate.auth.userId);
     audit(auditActor(gate.auth.username), "agent_connection_create", id, { name, baseUrl, enabled, isDefault });
-    return NextResponse.json({ success: true, connection: listAgentConnections().find((connection) => connection.id === id) });
+    return NextResponse.json({ success: true, connection: listAgentConnections(gate.auth.userId).find((connection) => connection.id === id) });
   } catch (error) {
     if (error instanceof Error && error.message.includes("UNIQUE")) {
       return NextResponse.json({ error: "connection_exists" }, { status: 409 });

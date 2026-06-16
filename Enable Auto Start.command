@@ -11,14 +11,15 @@ USER_ID="$(id -u)"
 
 mkdir -p "$PLIST_DIR" logs data
 chmod +x "$SERVICE_SCRIPT"
+chmod +x "$APP_DIR/scripts/didi-ai-watchdog.sh"
 
 launchctl bootout "gui/$USER_ID" "$PLIST_PATH" >/dev/null 2>&1 || true
 
 PORT_PIDS="$(lsof -t -iTCP:3001 -sTCP:LISTEN 2>/dev/null)"
 APP_PIDS=""
-for PID in $(pgrep -f "next dev|next start|next-server|node_modules/.bin/next|.next/standalone/server.js" 2>/dev/null); do
+for PID in $(pgrep -f "next dev|next start|next-server|node_modules/.bin/next|.next/standalone/server.js|didi-ai-watchdog.sh" 2>/dev/null); do
   CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-  if [ "$CWD" = "$APP_DIR" ]; then
+  if [ "$CWD" = "$APP_DIR" ] || [[ "$CWD" == "$APP_DIR"/* ]]; then
     APP_PIDS="$APP_PIDS $PID"
   fi
 done
@@ -94,6 +95,7 @@ done
 
 if kill -0 "$KICKSTART_PID" 2>/dev/null; then
   kill "$KICKSTART_PID" 2>/dev/null || true
+  wait "$KICKSTART_PID" 2>/dev/null || true
 fi
 
 echo "✅ Auto-start đã bật."

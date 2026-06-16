@@ -5,6 +5,7 @@ import { clientIp } from "@/lib/auth/ip";
 import { hashPassword, validatePasswordPolicy, verifyPassword } from "@/lib/auth/password";
 import { issueCsrf } from "@/lib/auth/csrf";
 import {
+  DEFAULT_MENUS,
   cookieName,
   createSession,
   destroySessionByRawToken,
@@ -28,6 +29,7 @@ type UserRow = {
   mustChangePassword: number;
   failedAttempts: number;
   lockedUntil: number | null;
+  menuPermissions?: string | null;
 };
 
 function sleep(ms: number) {
@@ -44,7 +46,7 @@ function getUser(username: string) {
       `
       SELECT id, username, password_hash as passwordHash, role, status, totp_secret as totpSecret,
              must_change_password as mustChangePassword, failed_attempts as failedAttempts,
-             locked_until as lockedUntil
+             locked_until as lockedUntil, menu_permissions as menuPermissions
       FROM admin_users
       WHERE username = ?
     `,
@@ -134,6 +136,16 @@ async function login(request: NextRequest) {
     .run(now(), ip || null, now(), user.id);
 
   audit(auditActor(user.username), "login_ok", user.username, undefined, { ip, userAgent });
+
+  let parsedPermissions = DEFAULT_MENUS;
+  if (user.menuPermissions !== null && user.menuPermissions !== undefined) {
+    try {
+      parsedPermissions = JSON.parse(user.menuPermissions);
+    } catch (e) {
+      parsedPermissions = [];
+    }
+  }
+
   const response = NextResponse.json({
     success: true,
     nextStep: user.mustChangePassword
@@ -147,6 +159,7 @@ async function login(request: NextRequest) {
       role: user.role,
       mustChangePassword: Boolean(user.mustChangePassword),
       hasTotp: Boolean(user.totpSecret),
+      menuPermissions: parsedPermissions,
     },
     csrfToken: issueCsrf(tokenHash),
   });

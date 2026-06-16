@@ -12,7 +12,13 @@ export async function GET(req: NextRequest) {
 
     try {
         const data = await fs.readFile(TASKS_FILE_PATH, "utf-8");
-        const tasks = JSON.parse(data);
+        let tasks = JSON.parse(data);
+        if (!Array.isArray(tasks)) tasks = [];
+
+        if (process.env.AUTH_MODE === "required" && gate.auth.userId && gate.auth.role !== "superadmin") {
+            tasks = tasks.filter((t: any) => t.createdByUserId === gate.auth.userId);
+        }
+
         return NextResponse.json(process.env.AUTH_MODE === "required" ? tasks.map(maskTaskSecrets) : tasks);
     } catch (error: any) {
         return NextResponse.json({ error: error.message || "Failed to read tasks" }, { status: 500 });

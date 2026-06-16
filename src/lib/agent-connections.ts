@@ -99,8 +99,21 @@ export function connectionWithSecrets(row: AgentConnectionRow): AgentConnectionW
   };
 }
 
-export function listAgentConnections() {
-  const rows = getDb()
+export function listAgentConnections(userId: number | null = null) {
+  const db = getDb();
+  if (userId !== null) {
+    const rows = db
+      .prepare(
+        `
+        SELECT * FROM agent_connections
+        WHERE user_id = ? OR user_id IS NULL
+        ORDER BY is_default DESC, enabled DESC, name COLLATE NOCASE ASC
+      `,
+      )
+      .all(userId) as AgentConnectionRow[];
+    return rows.map(publicAgentConnection);
+  }
+  const rows = db
     .prepare(
       `
       SELECT * FROM agent_connections
@@ -111,22 +124,42 @@ export function listAgentConnections() {
   return rows.map(publicAgentConnection);
 }
 
-export function getAgentConnectionRow(id: string) {
-  return getDb().prepare("SELECT * FROM agent_connections WHERE id = ?").get(id) as AgentConnectionRow | undefined;
+export function getAgentConnectionRow(id: string, userId: number | null = null) {
+  const db = getDb();
+  if (userId !== null) {
+    return db
+      .prepare("SELECT * FROM agent_connections WHERE id = ? AND (user_id = ? OR user_id IS NULL)")
+      .get(id, userId) as AgentConnectionRow | undefined;
+  }
+  return db.prepare("SELECT * FROM agent_connections WHERE id = ?").get(id) as AgentConnectionRow | undefined;
 }
 
-export function getAgentConnection(id: string) {
-  const row = getAgentConnectionRow(id);
+export function getAgentConnection(id: string, userId: number | null = null) {
+  const row = getAgentConnectionRow(id, userId);
   return row ? publicAgentConnection(row) : null;
 }
 
-export function getAgentConnectionWithSecrets(id: string) {
-  const row = getAgentConnectionRow(id);
+export function getAgentConnectionWithSecrets(id: string, userId: number | null = null) {
+  const row = getAgentConnectionRow(id, userId);
   return row ? connectionWithSecrets(row) : null;
 }
 
-export function getDefaultAgentConnectionWithSecrets() {
-  const row = getDb()
+export function getDefaultAgentConnectionWithSecrets(userId: number | null = null) {
+  const db = getDb();
+  if (userId !== null) {
+    const row = db
+      .prepare(
+        `
+        SELECT * FROM agent_connections
+        WHERE enabled = 1 AND (user_id = ? OR user_id IS NULL)
+        ORDER BY is_default DESC, updated_at DESC
+        LIMIT 1
+      `,
+      )
+      .get(userId) as AgentConnectionRow | undefined;
+    return row ? connectionWithSecrets(row) : null;
+  }
+  const row = db
     .prepare(
       `
       SELECT * FROM agent_connections
@@ -139,7 +172,11 @@ export function getDefaultAgentConnectionWithSecrets() {
   return row ? connectionWithSecrets(row) : null;
 }
 
-export function markOnlyDefault(id: string) {
+export function markOnlyDefault(id: string, userId: number | null = null) {
   const db = getDb();
+  if (userId !== null) {
+    db.prepare("UPDATE agent_connections SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE user_id = ? OR id = ?").run(id, userId, id);
+    return;
+  }
   db.prepare("UPDATE agent_connections SET is_default = CASE WHEN id = ? THEN 1 ELSE 0 END").run(id);
 }

@@ -17,7 +17,8 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   const gate = requireDidiAccess(request, "viewer", { action: "agent_connection_snapshot" });
   if (!gate.ok) return gate.response;
   const { id } = await context.params;
-  const connection = getAgentConnectionWithSecrets(id);
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  const connection = getAgentConnectionWithSecrets(id, filterUserId);
   if (!connection || !connection.enabled) return NextResponse.json({ error: "agent_connection_not_found" }, { status: 404 });
   if (!connection.adminToken) return NextResponse.json({ error: "agent_admin_token_not_configured" }, { status: 503 });
 

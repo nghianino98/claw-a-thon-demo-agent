@@ -41,7 +41,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   if (!gate.ok) return gate.response;
 
   const { id } = await context.params;
-  const bot = getBotConnectionWithSecret(id);
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  const bot = getBotConnectionWithSecret(id, filterUserId);
   if (!bot) return NextResponse.json({ error: "not_found" }, { status: 404 });
   if (!bot.token) return NextResponse.json({ error: "no_token" }, { status: 400 });
 

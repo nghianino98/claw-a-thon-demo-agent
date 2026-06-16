@@ -149,7 +149,7 @@ function resolveScheduledCredential(task) {
     }
 }
 
-async function addHistoryEntry(taskName, status, processedFiles = 0, type = 'auto', url = '', errorLog = null) {
+async function addHistoryEntry(taskName, status, processedFiles = 0, type = 'auto', url = '', errorLog = null, ownerUserId = null) {
     await withLock(async () => {
         try {
             let history = [];
@@ -168,6 +168,7 @@ async function addHistoryEntry(taskName, status, processedFiles = 0, type = 'aut
                 status: status,
                 processedFiles: processedFiles,
                 type: type,
+                createdByUserId: ownerUserId,
                 ...(errorLog ? { errorLog } : {})
             };
 
@@ -320,15 +321,17 @@ async function runTask(task) {
             releaseProcessSlot();
         }
 
+        const ownerUserId = task.scheduleOwnerUserId || task.createdByUserId || null;
         // Update lastSyncTime upon success
         const nowStr = new Date().toISOString();
         await updateTaskLastSyncTime(task.id, nowStr);
-        await addHistoryEntry(task.name, 'success', processedFilesCount, 'auto', task.url);
+        await addHistoryEntry(task.name, 'success', processedFilesCount, 'auto', task.url, null, ownerUserId);
         await logMsg(`[INFO] Updated history & lastSyncTime for ${task.name}.`);
 
     } catch (err) {
+        const ownerUserId = task.scheduleOwnerUserId || task.createdByUserId || null;
         await logMsg(`[ERROR] Task ${task.name} failed: ${err.message}`);
-        await addHistoryEntry(task.name, 'error', 0, 'auto', task.url, err.message);
+        await addHistoryEntry(task.name, 'error', 0, 'auto', task.url, err.message, ownerUserId);
     } finally {
         isRunning.delete(task.id);
     }
@@ -371,9 +374,9 @@ async function runWorkflow(workflow) {
                         await runTask(task);
                         
                         if (wasRunning) isRunning.add(task.id);
-                    } else {
+                        const ownerUserId = workflow.createdByUserId || null;
                         await logMsg(`[ERROR] Linked task ${tid} not found for node ${current.id} in workflow "${workflow.name}". Task may have been deleted. Remove it from the node to fix.`);
-                        await addHistoryEntry(`Tác vụ ${tid}`, 'error', 0, 'auto', '', `Task ID ${tid} không tồn tại trong hệ thống. Đã bị xóa khỏi Knowledge Base nhưng vẫn còn reference trong workflow "${workflow.name}". Vào chỉnh sửa node và bỏ chọn task này để khắc phục.`);
+                        await addHistoryEntry(`Tác vụ ${tid}`, 'error', 0, 'auto', '', `Task ID ${tid} không tồn tại trong hệ thống. Đã bị xóa khỏi Knowledge Base nhưng vẫn còn reference trong workflow "${workflow.name}". Vào chỉnh sửa node và bỏ chọn task này để khắc phục.`, ownerUserId);
                     }
                 }
             }
@@ -386,14 +389,16 @@ async function runWorkflow(workflow) {
             }
         }
 
+        const ownerUserId = workflow.createdByUserId || null;
         const nowStr = new Date().toISOString();
         await updateWorkflowLastSyncTime(workflow.id, nowStr);
         await logMsg(`[SUCCESS] Workflow ${workflow.name} completed successfully.`);
-        await addHistoryEntry(workflow.name, 'success', 0, 'workflow');
+        await addHistoryEntry(workflow.name, 'success', 0, 'workflow', '', null, ownerUserId);
 
     } catch (err) {
+        const ownerUserId = workflow.createdByUserId || null;
         await logMsg(`[ERROR] Workflow ${workflow.name} failed: ${err.message}`);
-        await addHistoryEntry(workflow.name, 'error', 0, 'workflow');
+        await addHistoryEntry(workflow.name, 'error', 0, 'workflow', '', null, ownerUserId);
     } finally {
         isRunning.delete(workflow.id);
     }

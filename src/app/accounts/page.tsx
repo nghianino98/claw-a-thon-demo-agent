@@ -26,6 +26,7 @@ import {
   KeyRound,
   QrCode,
   Trash2,
+  UserCog,
 } from "lucide-react";
 
 interface AdminUser {
@@ -37,7 +38,44 @@ interface AdminUser {
   lastLoginAt: number | null;
   lastLoginIp: string | null;
   createdAt: number;
+  menuPermissions?: string[];
 }
+
+const CONFIGURABLE_GROUPS = [
+  {
+    title: "Collector",
+    menus: [
+      { path: "/knowledge-base", label: "Trải nghiệm / Tra cứu" },
+      { path: "/history", label: "Hoạt động / Nhật ký" },
+    ]
+  },
+  {
+    title: "Quy trình (Workflow)",
+    menus: [
+      { path: "/workflows", label: "Thiết kế quy trình" },
+    ]
+  },
+  {
+    title: "Quản trị agent",
+    menus: [
+      { path: "/agent-admin/dashboard", label: "Bảng điều hành" },
+      { path: "/agent-admin/agent-connects", label: "Kết nối Agent" },
+      { path: "/agent-admin/bot-management", label: "Kết nối Bot" },
+      { path: "/agent-admin/instructions", label: "Thiết kế prompt (Instructions)" },
+      { path: "/agent-admin/skills", label: "Kỹ năng (Skills)" },
+      { path: "/agent-admin/knowledge", label: "Dữ liệu tri thức (Knowledge)" },
+    ]
+  },
+  {
+    title: "Hệ thống",
+    menus: [
+      { path: "/settings/mcp", label: "Kết nối MCP" },
+      { path: "/settings", label: "Cấu hình hệ thống" },
+    ]
+  }
+];
+
+const CONFIGURABLE_MENUS = CONFIGURABLE_GROUPS.flatMap((g) => g.menus);
 
 interface Session {
   tokenHash: string;
@@ -72,6 +110,45 @@ export default function AccountsPage() {
   const [newRole, setNewRole] = React.useState<"superadmin" | "operator" | "viewer">("operator");
   const [newPassword, setNewPassword] = React.useState("");
   const [userSubmitting, setUserSubmitting] = React.useState(false);
+  const [selectedMenus, setSelectedMenus] = React.useState<string[]>(
+    CONFIGURABLE_MENUS.map(m => m.path)
+  );
+
+  // Edit Permissions states
+  const [isEditPermissionsOpen, setIsEditPermissionsOpen] = React.useState(false);
+  const [editingUser, setEditingUser] = React.useState<AdminUser | null>(null);
+  const [editSelectedMenus, setEditSelectedMenus] = React.useState<string[]>([]);
+  const [editPermissionsSubmitting, setEditPermissionsSubmitting] = React.useState(false);
+
+  const handleOpenEditPermissions = (targetUser: AdminUser) => {
+    setEditingUser(targetUser);
+    setEditSelectedMenus(targetUser.menuPermissions || []);
+    setIsEditPermissionsOpen(true);
+  };
+
+  const handleSavePermissions = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser || editPermissionsSubmitting) return;
+
+    setEditPermissionsSubmitting(true);
+    try {
+      await apiFetch(`/api/accounts/${editingUser.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          menuPermissions: editSelectedMenus,
+        }),
+      });
+      toast.success("Cập nhật phân quyền menu thành công!");
+      setIsEditPermissionsOpen(false);
+      setEditingUser(null);
+      loadUsers();
+    } catch (err) {
+      console.error(err);
+      toast.error("Không thể cập nhật phân quyền menu.");
+    } finally {
+      setEditPermissionsSubmitting(false);
+    }
+  };
 
   // Reset actions
   const [resetPwResult, setResetPwResult] = React.useState("");
@@ -146,6 +223,7 @@ export default function AccountsPage() {
           username: newUsername.trim(),
           role: newRole,
           password: newPassword.trim() || undefined,
+          menuPermissions: newRole === "superadmin" ? undefined : selectedMenus,
         }),
       });
 
@@ -157,6 +235,7 @@ export default function AccountsPage() {
         setNewUsername("");
         setNewPassword("");
         setNewRole("operator");
+        setSelectedMenus(CONFIGURABLE_MENUS.map(m => m.path));
       }
       loadUsers();
     } catch (err) {
@@ -370,6 +449,19 @@ export default function AccountsPage() {
                     >
                       <KeyRound className="w-4 h-4" />
                     </Button>
+
+                    {/* Edit menu permissions */}
+                    {row.role !== "superadmin" ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleOpenEditPermissions(row)}
+                        className="p-1.5 cursor-pointer text-zinc-500 rounded-lg hover:bg-zinc-100 hover:text-zinc-900"
+                        title="Phân quyền menu"
+                      >
+                        <UserCog className="w-4 h-4 text-blue-600" />
+                      </Button>
+                    ) : null}
                   </div>
                 ),
               },
@@ -438,6 +530,7 @@ export default function AccountsPage() {
           setNewUsername("");
           setNewPassword("");
           setNewRole("operator");
+          setSelectedMenus(CONFIGURABLE_MENUS.map(m => m.path));
         }}
         title="Tạo Tài khoản quản trị mới"
         footer={
@@ -450,6 +543,7 @@ export default function AccountsPage() {
               setNewUsername("");
               setNewPassword("");
               setNewRole("operator");
+              setSelectedMenus(CONFIGURABLE_MENUS.map(m => m.path));
             }}
             disabled={userSubmitting}
             className="rounded-xl font-semibold"
@@ -493,6 +587,44 @@ export default function AccountsPage() {
                 onChange={(e) => setNewPassword(e.target.value)}
                 className="h-10 rounded-xl"
               />
+            </Field>
+
+            <Field label="Phân quyền truy cập Menu (chỉ áp dụng với Operator/Viewer)">
+              <div className="space-y-4 max-h-80 overflow-y-auto border border-zinc-100 rounded-xl p-4 bg-zinc-50/50 mt-2">
+                {CONFIGURABLE_GROUPS.map((group) => (
+                  <div key={group.title} className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                      {group.title}
+                    </span>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {group.menus.map((menu) => {
+                        const isChecked = selectedMenus.includes(menu.path);
+                        return (
+                          <label
+                            key={menu.path}
+                            className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-white hover:shadow-sm cursor-pointer select-none transition-all border border-transparent hover:border-zinc-100 bg-white/50"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              disabled={newRole === "superadmin"}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedMenus((prev) => [...prev, menu.path]);
+                                } else {
+                                  setSelectedMenus((prev) => prev.filter((p) => p !== menu.path));
+                                }
+                              }}
+                              className="rounded border-zinc-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
+                            />
+                            <span className="text-xs font-semibold text-zinc-700">{menu.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </Field>
 
             <Button
@@ -560,6 +692,84 @@ export default function AccountsPage() {
         message={confirmAction.message}
         isDestructive
       />
+
+      {/* Modal: Edit Menu Permissions */}
+      <Modal
+        isOpen={isEditPermissionsOpen}
+        onClose={() => {
+          setIsEditPermissionsOpen(false);
+          setEditingUser(null);
+        }}
+        title={`Phân quyền truy cập menu cho: ${editingUser?.username}`}
+        footer={
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setIsEditPermissionsOpen(false);
+                setEditingUser(null);
+              }}
+              disabled={editPermissionsSubmitting}
+              className="rounded-xl font-semibold"
+            >
+              Hủy
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleSavePermissions}
+              isLoading={editPermissionsSubmitting}
+              className="rounded-xl font-bold cursor-pointer"
+            >
+              Lưu thay đổi
+            </Button>
+          </div>
+        }
+      >
+        <form onSubmit={handleSavePermissions} className="space-y-4">
+          <div className="p-3 bg-blue-50/50 border border-blue-100 rounded-xl text-xs font-medium text-blue-700 leading-relaxed">
+            Chọn các menu mà tài khoản này được phép truy cập. Các trang không được chọn sẽ bị ẩn trên thanh menu bên trái và tự động chuyển hướng khi truy cập trực tiếp.
+          </div>
+
+          <Field label="Danh sách Menu được phép truy cập">
+            <div className="space-y-4 max-h-80 overflow-y-auto border border-zinc-100 rounded-xl p-4 bg-zinc-50/50 mt-2">
+              {CONFIGURABLE_GROUPS.map((group) => (
+                <div key={group.title} className="space-y-1.5">
+                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                    {group.title}
+                  </span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {group.menus.map((menu) => {
+                      const isChecked = editSelectedMenus.includes(menu.path);
+                      return (
+                        <label
+                          key={menu.path}
+                          className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-white hover:shadow-sm cursor-pointer select-none transition-all border border-transparent hover:border-zinc-100 bg-white/50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setEditSelectedMenus((prev) => [...prev, menu.path]);
+                              } else {
+                                setEditSelectedMenus((prev) => prev.filter((p) => p !== menu.path));
+                              }
+                            }}
+                            className="rounded border-zinc-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
+                          />
+                          <span className="text-xs font-semibold text-zinc-700">{menu.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Field>
+        </form>
+      </Modal>
     </PageShell>
   );
 }

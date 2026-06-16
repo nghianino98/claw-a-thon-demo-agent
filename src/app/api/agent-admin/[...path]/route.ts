@@ -32,9 +32,10 @@ async function handler(request: NextRequest, context: { params: Promise<{ path: 
   }
 
   const requestedConnectionId = request.headers.get("x-agent-connection-id")?.trim();
+  const filterUserId = auth.role === "superadmin" ? null : auth.userId;
   const connection = requestedConnectionId
-    ? getAgentConnectionWithSecrets(requestedConnectionId)
-    : getDefaultAgentConnectionWithSecrets();
+    ? getAgentConnectionWithSecrets(requestedConnectionId, filterUserId)
+    : getDefaultAgentConnectionWithSecrets(filterUserId);
   if (!connection || !connection.enabled) {
     return NextResponse.json({ error: requestedConnectionId ? "agent_connection_not_found" : "agent_connection_not_configured" }, { status: requestedConnectionId ? 404 : 503 });
   }

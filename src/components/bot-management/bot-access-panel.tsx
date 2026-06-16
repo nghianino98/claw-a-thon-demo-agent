@@ -20,6 +20,7 @@ export function BotAccessPanel() {
   const t = useTranslation();
   const { selectedId } = useAgentConnectStore();
   const [users, setUsers] = React.useState<AgentAccessUser[]>([]);
+  const [allUsers, setAllUsers] = React.useState<AgentAccessUser[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<unknown>(null);
   const [processingId, setProcessingId] = React.useState<string | null>(null);
@@ -32,7 +33,12 @@ export function BotAccessPanel() {
     try {
       const apiStatus = statusFilter === "approved" ? "allowed" : statusFilter;
       const query = apiStatus ? `?status=${encodeURIComponent(apiStatus)}` : "";
-      setUsers(normalizeAccessUsers(await apiFetch(`/api/agent-admin/access${query}`)));
+      const [filteredData, allData] = await Promise.all([
+        apiFetch(`/api/agent-admin/access${query}`),
+        apiFetch(`/api/agent-admin/access`),
+      ]);
+      setUsers(normalizeAccessUsers(filteredData));
+      setAllUsers(normalizeAccessUsers(allData));
     } catch (err) {
       console.error(err);
       if (!silent) setError(err);
@@ -113,11 +119,6 @@ export function BotAccessPanel() {
             <DataTable<AgentAccessUser>
               columns={[
                 {
-                  key: "telegramId",
-                  header: t("accessThTelegramId"),
-                  render: (row) => <code className="font-mono text-xs">{row.telegramId}</code>,
-                },
-                {
                   key: "name",
                   header: t("accessThName"),
                   render: (row) => (
@@ -163,17 +164,32 @@ export function BotAccessPanel() {
                 {
                   key: "decidedInfo",
                   header: t("accessThDecidedBy"),
-                  render: (row) =>
-                    row.decidedBy ? (
+                  render: (row) => {
+                    const getDecidedByLabel = (decidedBy: string | null) => {
+                      if (!decidedBy) return "-";
+                      if (decidedBy.startsWith("tg-")) {
+                        const tgId = decidedBy.slice(3);
+                        const found = allUsers.find((u) => u.telegramId === tgId || u.id === tgId);
+                        if (found) {
+                          const fullName = [found.firstName, found.lastName].filter(Boolean).join(" ");
+                          const usernamePart = found.username ? ` (@${found.username})` : "";
+                          return fullName ? `${fullName}${usernamePart}` : `@${found.username || tgId}`;
+                        }
+                      }
+                      return decidedBy;
+                    };
+                    const label = getDecidedByLabel(row.decidedBy);
+                    return row.decidedBy ? (
                       <div className="text-xs space-y-0.5">
-                        <span className="font-semibold text-zinc-700">{row.decidedBy}</span>
+                        <span className="font-semibold text-zinc-700">{label}</span>
                         {row.decidedAt && (
                           <p className="text-[10px] text-zinc-400">{format(row.decidedAt, "dd/MM HH:mm")}</p>
                         )}
                       </div>
                     ) : (
                       <span className="text-zinc-400">-</span>
-                    ),
+                    );
+                  },
                 },
                 {
                   key: "actions",

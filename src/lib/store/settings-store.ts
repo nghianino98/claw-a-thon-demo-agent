@@ -14,8 +14,9 @@ export interface SourceSettings {
 }
 
 interface SettingsState {
-    defaults: Record<CrawlerSource, SourceSettings>;
-    updateDefault: (source: CrawlerSource, settings: Partial<SourceSettings>) => void;
+    userDefaults: Record<string, Record<CrawlerSource, SourceSettings>>; // username -> defaults
+    getDefaults: (username: string) => Record<CrawlerSource, SourceSettings>;
+    updateDefault: (username: string, source: CrawlerSource, settings: Partial<SourceSettings>) => void;
 }
 
 const initialDefaults: Record<CrawlerSource, SourceSettings> = {
@@ -42,20 +43,34 @@ const initialDefaults: Record<CrawlerSource, SourceSettings> = {
 
 export const useSettingsStore = create<SettingsState>()(
     persist(
-        (set) => ({
-            defaults: initialDefaults,
-            updateDefault: (source, settings) => set((state) => ({
-                defaults: {
-                    ...state.defaults,
-                    [source]: {
-                        ...state.defaults[source],
-                        ...settings,
-                    },
-                },
-            })),
+        (set, get) => ({
+            userDefaults: {},
+            getDefaults: (username) => {
+                const key = username || 'local';
+                return get().userDefaults[key] || initialDefaults;
+            },
+            updateDefault: (username, source, settings) => {
+                const key = username || 'local';
+                set((state) => {
+                    const currentDefaults = state.userDefaults[key] || { ...initialDefaults };
+                    return {
+                        userDefaults: {
+                            ...state.userDefaults,
+                            [key]: {
+                                ...currentDefaults,
+                                [source]: {
+                                    ...currentDefaults[source],
+                                    ...settings
+                                }
+                            }
+                        }
+                    };
+                });
+            }
         }),
         {
             name: 'crawler_settings_store',
+            partialize: (state) => ({ userDefaults: state.userDefaults }),
         }
     )
 );

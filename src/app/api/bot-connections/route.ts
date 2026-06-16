@@ -33,7 +33,8 @@ function asBool(value: unknown, fallback = false) {
 export async function GET(request: NextRequest) {
   const gate = requireDidiAccess(request, "viewer", { action: "bot_connections_list" });
   if (!gate.ok) return gate.response;
-  return NextResponse.json({ connections: listBotConnections() });
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  return NextResponse.json({ connections: listBotConnections(filterUserId) });
 }
 
 export async function POST(request: NextRequest) {
@@ -71,15 +72,15 @@ export async function POST(request: NextRequest) {
         `
         INSERT INTO bot_connections (
           id, platform, name, token_encrypted, agent_connection_id,
-          enabled, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?)
+          enabled, status, created_at, updated_at, user_id
+        ) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)
       `,
       )
-      .run(id, platform, name, tokenEncrypted, agentConnectionId || null, enabled ? 1 : 0, t, t);
+      .run(id, platform, name, tokenEncrypted, agentConnectionId || null, enabled ? 1 : 0, t, t, gate.auth.userId);
     audit(auditActor(gate.auth.username), "bot_connection_create", id, { platform, name, enabled });
     return NextResponse.json({
       success: true,
-      connection: listBotConnections().find((connection) => connection.id === id),
+      connection: listBotConnections(gate.auth.userId).find((connection) => connection.id === id),
     });
   } catch (error) {
     if (error instanceof Error && error.message.includes("UNIQUE")) {

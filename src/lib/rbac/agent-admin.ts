@@ -6,6 +6,7 @@ const RULES: RouteRule[] = [
   { method: "POST", pattern: "/admin/api/instructions/:id/activate", role: "operator" },
   { method: "POST", pattern: "/admin/api/skills", role: "operator" },
   { method: "PATCH", pattern: "/admin/api/skills/:id", role: "operator" },
+  { method: "DELETE", pattern: "/admin/api/skills/:id", role: "operator" },
   { method: "POST", pattern: "/admin/api/workflows", role: "operator" },
   { method: "PATCH", pattern: "/admin/api/workflows/:id", role: "operator" },
   { method: "POST", pattern: "/admin/api/workflows/:id/run", role: "operator" },

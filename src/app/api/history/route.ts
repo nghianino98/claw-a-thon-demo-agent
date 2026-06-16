@@ -32,7 +32,13 @@ export async function GET(req: NextRequest) {
     try {
         await ensureHistoryFile();
         const data = await fs.readFile(HISTORY_FILE_PATH, "utf-8");
-        const history = JSON.parse(data);
+        let history = JSON.parse(data);
+        if (!Array.isArray(history)) history = [];
+
+        if (process.env.AUTH_MODE === "required" && gate.auth.userId && gate.auth.role !== "superadmin") {
+            history = history.filter((h: any) => h.createdByUserId === gate.auth.userId);
+        }
+
         history.sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime());
         return NextResponse.json(history);
     } catch (error: any) {
@@ -55,6 +61,10 @@ export async function POST(req: NextRequest) {
         if (!entry.id) entry.id = Date.now().toString();
         if (!entry.date) entry.date = new Date().toISOString();
 
+        if (process.env.AUTH_MODE === "required" && gate.auth.userId) {
+            entry.createdByUserId = gate.auth.userId;
+        }
+
         history.push(entry);
         const truncated = history
             .sort((a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -75,13 +85,27 @@ export async function DELETE(req: NextRequest) {
         const { searchParams } = new URL(req.url);
         const id = searchParams.get("id");
 
+        const data = await fs.readFile(HISTORY_FILE_PATH, "utf-8");
+        let history = JSON.parse(data);
+        if (!Array.isArray(history)) history = [];
+
+        const isRequired = process.env.AUTH_MODE === "required";
+        const userId = gate.auth.userId;
+
         if (!id) {
-            await atomicWriteHistory([]);
+            let remainingHistory = [];
+            if (isRequired && userId && gate.auth.role !== "superadmin") {
+                remainingHistory = history.filter((h: any) => h.createdByUserId !== userId);
+            }
+            await atomicWriteHistory(remainingHistory);
             return NextResponse.json({ success: true, message: "Cleared all history" });
         }
 
-        const data = await fs.readFile(HISTORY_FILE_PATH, "utf-8");
-        const history = JSON.parse(data);
+        const entryToDelete = history.find((h: any) => h.id === id);
+        if (entryToDelete && isRequired && userId && gate.auth.role !== "superadmin" && entryToDelete.createdByUserId !== userId) {
+            return NextResponse.json({ error: "forbidden" }, { status: 403 });
+        }
+
         const newHistory = history.filter((h: any) => h.id !== id);
 
         await atomicWriteHistory(newHistory);

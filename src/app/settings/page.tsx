@@ -5,10 +5,14 @@ import { Settings, Globe, Languages, Database, Link as LinkIcon, User, Key, GitB
 import { useI18nStore, useTranslation } from "@/lib/store/i18n-store";
 import { useSettingsStore, CrawlerSource } from "@/lib/store/settings-store";
 import { ConfluenceIcon, JiraIcon, GitLabIcon } from "@/components/ui/brand-icons";
+import { useAuth } from "@/lib/store/auth-store";
 
 export default function SettingsPage() {
     const { language, setLanguage } = useI18nStore();
-    const { defaults, updateDefault } = useSettingsStore();
+    const { user } = useAuth();
+    const username = user?.username || 'local';
+    const { getDefaults, updateDefault } = useSettingsStore();
+    const defaults = getDefaults(username);
     const t = useTranslation();
 
     const toggleLanguage = (lang: 'vi' | 'en') => {
@@ -159,7 +163,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.confluence.url}
                                         placeholder="https://confluence.example.com"
-                                        onChange={(e) => updateDefault('confluence', { url: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'confluence', { url: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -171,7 +175,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.confluence.username}
                                         placeholder="username"
-                                        onChange={(e) => updateDefault('confluence', { username: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'confluence', { username: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -183,7 +187,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.confluence.apiKey}
                                         placeholder="••••••••••••••••"
-                                        onChange={(e) => updateDefault('confluence', { apiKey: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'confluence', { apiKey: e.target.value })}
                                     />
                                 </div>
                                 <div className="col-span-full pt-4">
@@ -212,7 +216,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.jira.url}
                                         placeholder="https://your-domain.atlassian.net"
-                                        onChange={(e) => updateDefault('jira', { url: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'jira', { url: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -224,7 +228,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.jira.username}
                                         placeholder="user@company.com"
-                                        onChange={(e) => updateDefault('jira', { username: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'jira', { username: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -236,7 +240,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.jira.apiKey}
                                         placeholder="Jira API Token"
-                                        onChange={(e) => updateDefault('jira', { apiKey: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'jira', { apiKey: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -248,7 +252,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.jira.projectKey}
                                         placeholder="PROJ"
-                                        onChange={(e) => updateDefault('jira', { projectKey: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'jira', { projectKey: e.target.value })}
                                     />
                                 </div>
                                 <div className="col-span-full pt-4">
@@ -277,7 +281,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.url}
                                         placeholder="https://gitlab.com"
-                                        onChange={(e) => updateDefault('gitlab', { url: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { url: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -289,7 +293,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.username}
                                         placeholder="duynq5"
-                                        onChange={(e) => updateDefault('gitlab', { username: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { username: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -301,7 +305,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.apiKey}
                                         placeholder="glpat-xxxxxxxx"
-                                        onChange={(e) => updateDefault('gitlab', { apiKey: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { apiKey: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -313,7 +317,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.projectId}
                                         placeholder="group/project"
-                                        onChange={(e) => updateDefault('gitlab', { projectId: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { projectId: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -325,7 +329,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.branch}
                                         placeholder="main"
-                                        onChange={(e) => updateDefault('gitlab', { branch: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { branch: e.target.value })}
                                     />
                                 </div>
                                 <div>
@@ -337,7 +341,7 @@ export default function SettingsPage() {
                                         className="w-full rounded-xl border border-gray-200 bg-gray-50/30 px-4 py-2.5 text-sm focus:border-[#0144DB] focus:ring-[#0144DB] focus:bg-white shadow-sm transition-all"
                                         value={defaults.gitlab.groupId}
                                         placeholder="wealth/mmf"
-                                        onChange={(e) => updateDefault('gitlab', { groupId: e.target.value })}
+                                        onChange={(e) => updateDefault(username, 'gitlab', { groupId: e.target.value })}
                                     />
                                 </div>
                                 <div className="col-span-full pt-4">

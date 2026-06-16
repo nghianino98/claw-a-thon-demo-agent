@@ -43,7 +43,8 @@ export async function GET(request: NextRequest, context: { params: Promise<{ id:
   const gate = requireDidiAccess(request, "viewer", { action: "agent_connection_read" });
   if (!gate.ok) return gate.response;
   const { id } = await context.params;
-  const connection = getAgentConnection(id);
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  const connection = getAgentConnection(id, filterUserId);
   if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
   return NextResponse.json({ connection });
 }
@@ -52,7 +53,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const gate = requireDidiAccess(request, "operator", { csrf: true, action: "agent_connection_update" });
   if (!gate.ok) return gate.response;
   const { id } = await context.params;
-  if (!getAgentConnectionRow(id)) return NextResponse.json({ error: "not_found" }, { status: 404 });
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  if (!getAgentConnectionRow(id, filterUserId)) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const body = (await request.json().catch(() => ({}))) as PatchBody;
   const sets: string[] = [];
@@ -113,18 +115,32 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   if (sets.length === 0) return NextResponse.json({ error: "no_changes" }, { status: 400 });
 
   sets.push("updated_at = ?");
-  values.push(now(), id);
-  getDb().prepare(`UPDATE agent_connections SET ${sets.join(", ")} WHERE id = ?`).run(...values);
-  if (isDefaultProvided && isDefault) markOnlyDefault(id);
+  values.push(now());
+
+  if (gate.auth.userId !== null && gate.auth.role !== "superadmin") {
+    sets.push("user_id = ?");
+    values.push(gate.auth.userId);
+  }
+
+  if (filterUserId !== null) {
+    getDb().prepare(`UPDATE agent_connections SET ${sets.join(", ")} WHERE id = ? AND (user_id = ? OR user_id IS NULL)`).run(...values, id, filterUserId);
+  } else {
+    getDb().prepare(`UPDATE agent_connections SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
+  }
+
+  if (isDefaultProvided && isDefault) markOnlyDefault(id, filterUserId);
   audit(auditActor(gate.auth.username), "agent_connection_update", id, body);
-  return NextResponse.json({ success: true, connection: listAgentConnections().find((connection) => connection.id === id) });
+  return NextResponse.json({ success: true, connection: listAgentConnections(filterUserId).find((connection) => connection.id === id) });
 }
 
 export async function DELETE(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const gate = requireDidiAccess(request, "operator", { csrf: true, action: "agent_connection_delete" });
   if (!gate.ok) return gate.response;
   const { id } = await context.params;
-  const result = getDb().prepare("DELETE FROM agent_connections WHERE id = ?").run(id);
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  const result = filterUserId !== null
+    ? getDb().prepare("DELETE FROM agent_connections WHERE id = ? AND (user_id = ? OR user_id IS NULL)").run(id, filterUserId)
+    : getDb().prepare("DELETE FROM agent_connections WHERE id = ?").run(id);
   if (result.changes === 0) return NextResponse.json({ error: "not_found" }, { status: 404 });
   audit(auditActor(gate.auth.username), "agent_connection_delete", id);
   return NextResponse.json({ success: true });

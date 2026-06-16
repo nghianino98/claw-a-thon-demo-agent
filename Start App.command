@@ -9,6 +9,7 @@ LOG_DIR="logs"
 PID_FILE="$DATA_DIR/app.pid"
 PORT_FILE="$DATA_DIR/app.port"
 DAEMON_PID_FILE="$DATA_DIR/syncDaemon.pid"
+WATCHDOG_PID_FILE="$DATA_DIR/watchdog.pid"
 PORT_RANGE_START="${DIDI_AI_PORT_START:-3001}"
 PORT_RANGE_END="${DIDI_AI_PORT_END:-3001}"
 APP_MODE="${DIDI_AI_MODE:-production}"
@@ -48,7 +49,7 @@ find_pids_by_cwd_and_pattern() {
     PATTERN="$1"
     for PID in $(pgrep -f "$PATTERN" 2>/dev/null); do
         CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-        if [ "$CWD" = "$APP_DIR" ]; then
+        if [ "$CWD" = "$APP_DIR" ] || [[ "$CWD" == "$APP_DIR"/* ]]; then
             echo "$PID"
         fi
     done
@@ -75,6 +76,23 @@ stop_pid_tree() {
     done
 
     kill "$PID" 2>/dev/null
+}
+
+stop_pids() {
+    PIDS="$(printf "%s\n" "$@" | awk 'NF && !seen[$0]++')"
+    [ -z "$PIDS" ] && return 0
+
+    for PID in $PIDS; do
+        stop_pid_tree "$PID"
+    done
+
+    sleep 2
+
+    for PID in $PIDS; do
+        if is_pid_alive "$PID"; then
+            kill -9 "$PID" 2>/dev/null
+        fi
+    done
 }
 
 find_existing_port() {
@@ -135,6 +153,32 @@ warm_up_routes() {
     for ROUTE in "${WARMUP_ROUTES[@]}"; do
         curl -fsS --max-time 8 -o /dev/null "http://localhost:$PORT$ROUTE" >/dev/null 2>&1 || true
     done
+}
+
+find_port_pids_by_cwd() {
+    for PID in $(lsof -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null); do
+        CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+        if [ "$CWD" = "$APP_DIR" ]; then
+            echo "$PID"
+        fi
+    done
+}
+
+replace_wrong_server_on_port() {
+    if [ "$APP_MODE" != "production" ]; then
+        return 0
+    fi
+
+    DEV_PIDS="$(
+        find_pids_by_cwd_and_pattern "npm run dev"
+        find_pids_by_cwd_and_pattern "next dev"
+        find_pids_by_cwd_and_pattern "node_modules/.bin/next dev"
+    )"
+
+    if [ -n "$DEV_PIDS" ]; then
+        echo "🔁 Đang thay DEV server trên cổng $PORT_RANGE_START bằng PRODUCTION server..."
+        stop_pids $DEV_PIDS $(find_port_pids_by_cwd "$PORT_RANGE_START")
+    fi
 }
 
 start_app_server() {
@@ -202,6 +246,27 @@ start_sync_daemon() {
     disown 2>/dev/null || true
 }
 
+start_watchdog() {
+    if [ "$APP_MODE" != "production" ]; then
+        return 0
+    fi
+
+    if [ -f "$WATCHDOG_PID_FILE" ]; then
+        WATCHDOG_PID="$(cat "$WATCHDOG_PID_FILE" 2>/dev/null)"
+        if is_pid_alive "$WATCHDOG_PID"; then
+            echo "✅ Watchdog đang chạy sẵn (PID $WATCHDOG_PID)."
+            return 0
+        fi
+    fi
+
+    if [ -x scripts/didi-ai-watchdog.sh ]; then
+        echo "🩺 Đang bật watchdog giữ app ổn định..."
+        nohup env DIDI_APP_DIR="$APP_DIR" DIDI_AI_PORT="$APP_PORT" bash scripts/didi-ai-watchdog.sh >> "$LOG_DIR/watchdog.log" 2>&1 < /dev/null &
+        echo $! > "$WATCHDOG_PID_FILE"
+        disown 2>/dev/null || true
+    fi
+}
+
 echo "------------------------------------------"
 echo "🚀 Đang kiểm tra DuyNQ5 AI Tool..."
 echo "------------------------------------------"
@@ -223,6 +288,8 @@ if [ ! -d "node_modules" ]; then
     echo "📦 Đang cài đặt thư viện (chỉ thực hiện lần đầu)..."
     npm install --legacy-peer-deps
 fi
+
+replace_wrong_server_on_port
 
 EXISTING_PORT="$(find_existing_port)"
 if [ -n "$EXISTING_PORT" ]; then
@@ -291,6 +358,8 @@ if [ -n "$EXISTING_PORT" ]; then
 
     echo "✅ App đã đang chạy sẵn ở http://localhost:$EXISTING_PORT"
     start_sync_daemon
+    APP_PORT="$EXISTING_PORT"
+    start_watchdog
     warm_up_routes "$EXISTING_PORT"
     echo "🌐 Đang mở lại trình duyệt..."
     open "http://localhost:$EXISTING_PORT"
@@ -314,6 +383,7 @@ APP_PID="$APP_SERVER_PID"
 echo "$APP_PID" > "$PID_FILE"
 
 start_sync_daemon
+start_watchdog
 
 echo "⏱️ Đang đợi app sẵn sàng..."
 for _ in $(seq 1 40); do

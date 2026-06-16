@@ -86,8 +86,21 @@ export function publicBotConnection(row: BotConnectionRow): BotConnection {
   };
 }
 
-export function listBotConnections() {
-  const rows = getDb()
+export function listBotConnections(userId: number | null = null) {
+  const db = getDb();
+  if (userId !== null) {
+    const rows = db
+      .prepare(
+        `
+        SELECT * FROM bot_connections
+        WHERE user_id = ? OR user_id IS NULL
+        ORDER BY enabled DESC, platform ASC, name COLLATE NOCASE ASC
+      `,
+      )
+      .all(userId) as BotConnectionRow[];
+    return rows.map(publicBotConnection);
+  }
+  const rows = db
     .prepare(
       `
       SELECT * FROM bot_connections
@@ -98,17 +111,23 @@ export function listBotConnections() {
   return rows.map(publicBotConnection);
 }
 
-export function getBotConnectionRow(id: string) {
-  return getDb().prepare("SELECT * FROM bot_connections WHERE id = ?").get(id) as BotConnectionRow | undefined;
+export function getBotConnectionRow(id: string, userId: number | null = null) {
+  const db = getDb();
+  if (userId !== null) {
+    return db
+      .prepare("SELECT * FROM bot_connections WHERE id = ? AND (user_id = ? OR user_id IS NULL)")
+      .get(id, userId) as BotConnectionRow | undefined;
+  }
+  return db.prepare("SELECT * FROM bot_connections WHERE id = ?").get(id) as BotConnectionRow | undefined;
 }
 
-export function getBotConnection(id: string) {
-  const row = getBotConnectionRow(id);
+export function getBotConnection(id: string, userId: number | null = null) {
+  const row = getBotConnectionRow(id, userId);
   return row ? publicBotConnection(row) : null;
 }
 
-export function getBotConnectionWithSecret(id: string): BotConnectionWithSecret | null {
-  const row = getBotConnectionRow(id);
+export function getBotConnectionWithSecret(id: string, userId: number | null = null): BotConnectionWithSecret | null {
+  const row = getBotConnectionRow(id, userId);
   if (!row) return null;
   return { ...publicBotConnection(row), token: readSecret(row.token_encrypted) };
 }

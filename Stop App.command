@@ -8,6 +8,7 @@ DATA_DIR="data"
 PID_FILE="$DATA_DIR/app.pid"
 PORT_FILE="$DATA_DIR/app.port"
 DAEMON_PID_FILE="$DATA_DIR/syncDaemon.pid"
+WATCHDOG_PID_FILE="$DATA_DIR/watchdog.pid"
 AUTO_START_LABEL="com.didi-ai-tool.app"
 AUTO_START_PLIST="$HOME/Library/LaunchAgents/$AUTO_START_LABEL.plist"
 
@@ -23,7 +24,7 @@ find_pids_by_cwd_and_pattern() {
     PATTERN="$1"
     for PID in $(pgrep -f "$PATTERN" 2>/dev/null); do
         CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-        if [ "$CWD" = "$APP_DIR" ]; then
+        if [ "$CWD" = "$APP_DIR" ] || [[ "$CWD" == "$APP_DIR"/* ]]; then
             echo "$PID"
         fi
     done
@@ -33,7 +34,7 @@ find_port_pids_by_cwd() {
     PORT="$1"
     for PID in $(lsof -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do
         CWD="$(lsof -a -p "$PID" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
-        if [ "$CWD" = "$APP_DIR" ]; then
+        if [ "$CWD" = "$APP_DIR" ] || [[ "$CWD" == "$APP_DIR"/* ]]; then
             echo "$PID"
         fi
     done
@@ -76,6 +77,7 @@ PIDS="$PIDS $(find_pids_by_cwd_and_pattern "next dev")"
 PIDS="$PIDS $(find_pids_by_cwd_and_pattern "next start")"
 PIDS="$PIDS $(find_pids_by_cwd_and_pattern "next-server")"
 PIDS="$PIDS $(find_pids_by_cwd_and_pattern ".next/standalone/server.js")"
+PIDS="$PIDS $(find_pids_by_cwd_and_pattern "didi-ai-watchdog.sh")"
 
 if [ -f "$PORT_FILE" ]; then
     SAVED_PORT="$(cat "$PORT_FILE" 2>/dev/null)"
@@ -120,6 +122,7 @@ else
 fi
 
 rm -f "$PID_FILE" "$PORT_FILE" "$DAEMON_PID_FILE"
+rm -f "$WATCHDOG_PID_FILE"
 
 sleep 4
 exit 0

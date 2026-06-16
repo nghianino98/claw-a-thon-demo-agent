@@ -61,7 +61,7 @@ export async function apiFetch<T = unknown>(
     }
   }
 
-  const response = await fetch(input, {
+  let response = await fetch(input, {
     ...init,
     headers,
   });
@@ -72,6 +72,45 @@ export async function apiFetch<T = unknown>(
       errorData = await response.json();
     } catch {
       // Not a JSON error
+    }
+
+    if (
+      response.status === 403 &&
+      typeof errorData === "object" &&
+      errorData !== null &&
+      "error" in errorData &&
+      errorData.error === "csrf"
+    ) {
+      try {
+        const csrfRes = await fetch("/api/security/csrf");
+        if (csrfRes.ok) {
+          const csrfData = await csrfRes.json();
+          if (csrfData.csrfToken) {
+            useAuthStore.setState({ csrfToken: csrfData.csrfToken });
+            const retryHeaders = new Headers(headers);
+            retryHeaders.set("X-CSRF-Token", csrfData.csrfToken);
+            const retryResponse = await fetch(input, {
+              ...init,
+              headers: retryHeaders,
+            });
+            if (retryResponse.ok) {
+              const contentType = retryResponse.headers.get("content-type") || "";
+              if (!contentType.includes("application/json")) {
+                return (await retryResponse.text()) as unknown as T;
+              }
+              return retryResponse.json();
+            }
+            response = retryResponse;
+            try {
+              errorData = await response.json();
+            } catch {
+              errorData = null;
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Failed to auto-recover CSRF:", e);
+      }
     }
 
     if (response.status === 401) {

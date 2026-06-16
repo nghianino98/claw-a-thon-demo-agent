@@ -57,7 +57,8 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const gate = requireDidiAccess(request, "operator", { csrf: true, action: "agent_connection_test" });
   if (!gate.ok) return gate.response;
   const { id } = await context.params;
-  const connection = getAgentConnectionWithSecrets(id);
+  const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
+  const connection = getAgentConnectionWithSecrets(id, filterUserId);
   if (!connection) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
   const health = await runCheck({ url: buildAgentUrl(connection.baseUrl, "health") });

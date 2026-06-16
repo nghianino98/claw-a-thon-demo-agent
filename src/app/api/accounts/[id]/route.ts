@@ -16,6 +16,7 @@ type AccountPatchBody = {
   resetPassword?: boolean;
   password?: string;
   resetTotp?: boolean;
+  menuPermissions?: unknown;
 };
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -53,6 +54,18 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   }
   if (body.resetTotp) {
     sets.push("totp_secret = NULL");
+    destroyAllSessions(userId);
+  }
+  if (body.menuPermissions !== undefined) {
+    if (body.menuPermissions !== null && !Array.isArray(body.menuPermissions)) {
+      return NextResponse.json({ error: "invalid_menu_permissions" }, { status: 400 });
+    }
+    if (Array.isArray(body.menuPermissions)) {
+      const isValid = body.menuPermissions.every((item: unknown) => typeof item === "string");
+      if (!isValid) return NextResponse.json({ error: "invalid_menu_permissions" }, { status: 400 });
+    }
+    sets.push("menu_permissions = ?");
+    values.push(body.menuPermissions ? JSON.stringify(body.menuPermissions) : null);
     destroyAllSessions(userId);
   }
 

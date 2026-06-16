@@ -14,7 +14,22 @@ export type AuthContext = {
   csrfRequired: boolean;
   mustChangePassword?: boolean;
   hasTotp?: boolean;
+  menuPermissions?: string[];
 };
+
+export const DEFAULT_MENUS = [
+  "/knowledge-base",
+  "/history",
+  "/workflows",
+  "/agent-admin/dashboard",
+  "/agent-admin/agent-connects",
+  "/agent-admin/bot-management",
+  "/agent-admin/instructions",
+  "/agent-admin/skills",
+  "/agent-admin/knowledge",
+  "/settings/mcp",
+  "/settings"
+];
 
 const SESSION_COOKIE = "qs_session";
 const TOUCH_INTERVAL_MS = 60_000;
@@ -49,7 +64,8 @@ export function getSessionByRawToken(rawToken: string): AuthContext | null {
         u.role,
         u.status,
         u.must_change_password as mustChangePassword,
-        u.totp_secret as totpSecret
+        u.totp_secret as totpSecret,
+        u.menu_permissions as menuPermissions
       FROM admin_sessions s
       JOIN admin_users u ON u.id = s.user_id
       WHERE s.token_hash = ?
@@ -67,6 +83,7 @@ export function getSessionByRawToken(rawToken: string): AuthContext | null {
         role: Role;
         mustChangePassword: number;
         totpSecret: string | null;
+        menuPermissions: string | null;
       }
     | undefined;
 
@@ -74,6 +91,15 @@ export function getSessionByRawToken(rawToken: string): AuthContext | null {
 
   if (t - row.lastSeenAt > TOUCH_INTERVAL_MS) {
     getDb().prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE token_hash = ?").run(t, tokenHash);
+  }
+
+  let parsedPermissions: string[] = DEFAULT_MENUS;
+  if (row.menuPermissions !== null && row.menuPermissions !== undefined) {
+    try {
+      parsedPermissions = JSON.parse(row.menuPermissions);
+    } catch (e) {
+      parsedPermissions = [];
+    }
   }
 
   return {
@@ -85,6 +111,7 @@ export function getSessionByRawToken(rawToken: string): AuthContext | null {
     csrfRequired: true,
     mustChangePassword: Boolean(row.mustChangePassword),
     hasTotp: Boolean(row.totpSecret),
+    menuPermissions: parsedPermissions,
   };
 }
 
@@ -101,7 +128,8 @@ export function getTokenAuth(rawToken: string): AuthContext | null {
         u.role,
         u.status,
         u.must_change_password as mustChangePassword,
-        u.totp_secret as totpSecret
+        u.totp_secret as totpSecret,
+        u.menu_permissions as menuPermissions
       FROM admin_tokens tok
       JOIN admin_users u ON u.id = tok.user_id
       WHERE tok.token_hash = ?
@@ -118,12 +146,23 @@ export function getTokenAuth(rawToken: string): AuthContext | null {
         role: Role;
         mustChangePassword: number;
         totpSecret: string | null;
+        menuPermissions: string | null;
       }
     | undefined;
 
   if (!row) return null;
 
   getDb().prepare("UPDATE admin_tokens SET last_used_at = ? WHERE id = ?").run(t, row.tokenId);
+
+  let parsedPermissions: string[] = DEFAULT_MENUS;
+  if (row.menuPermissions !== null && row.menuPermissions !== undefined) {
+    try {
+      parsedPermissions = JSON.parse(row.menuPermissions);
+    } catch (e) {
+      parsedPermissions = [];
+    }
+  }
+
   return {
     kind: "token",
     userId: row.userId,
@@ -133,6 +172,7 @@ export function getTokenAuth(rawToken: string): AuthContext | null {
     csrfRequired: false,
     mustChangePassword: Boolean(row.mustChangePassword),
     hasTotp: Boolean(row.totpSecret),
+    menuPermissions: parsedPermissions,
   };
 }
 
@@ -145,6 +185,7 @@ export function getAuthContext(request: NextRequest): AuthContext | null {
       role: "superadmin",
       tokenHash: null,
       csrfRequired: false,
+      menuPermissions: DEFAULT_MENUS,
     };
   }
 

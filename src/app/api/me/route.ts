@@ -22,6 +22,7 @@ export async function GET(request: NextRequest) {
       role: auth.role,
       mustChangePassword: Boolean(auth.mustChangePassword),
       hasTotp: Boolean(auth.hasTotp),
+      menuPermissions: auth.menuPermissions || [],
     },
     csrfToken: auth.csrfRequired && auth.tokenHash ? issueCsrf(auth.tokenHash) : null,
   });

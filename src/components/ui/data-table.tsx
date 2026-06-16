@@ -85,7 +85,8 @@ export function DataTable<T>({
                       <td
                         key={col.key || colIdx}
                         className={cn(
-                          "px-6 py-4 whitespace-nowrap align-middle",
+                          "px-6 py-4 align-middle",
+                          !col.className?.includes("whitespace-") && "whitespace-nowrap",
                           col.align === "center" && "text-center",
                           col.align === "right" && "text-right",
                           col.className

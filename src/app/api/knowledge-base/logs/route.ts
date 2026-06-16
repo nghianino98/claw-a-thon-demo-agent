@@ -19,6 +19,16 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({ error: "Missing taskId" }, { status: 400 });
         }
 
+        if (process.env.AUTH_MODE === "required" && gate.auth.userId && gate.auth.role !== "superadmin") {
+            const TASKS_FILE_PATH = path.join(stateDir(), "tasks.json");
+            const tasksData = await fs.readFile(TASKS_FILE_PATH, "utf-8").catch(() => "[]");
+            const tasks = JSON.parse(tasksData);
+            const task = tasks.find((t: any) => t.id === taskId);
+            if (task && task.createdByUserId !== gate.auth.userId) {
+                return NextResponse.json({ error: "forbidden" }, { status: 403 });
+            }
+        }
+
         const logFilePath = path.join(stateDir(), "logs/manual", `task_${taskId}.log`);
 
         try {

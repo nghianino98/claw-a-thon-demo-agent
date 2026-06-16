@@ -154,7 +154,7 @@ async function mcpCall(endpoint: McpEndpoint, sid: string, id: number, name: str
 async function resolveMcpEndpoint(input: {
   agentConnectionId?: string;
   mcpConnectionId?: string;
-}): Promise<McpEndpoint> {
+}, userId: number | null = null): Promise<McpEndpoint> {
   const fallback = {
     url: MCP_URL,
     apiKey: MCP_APIKEY,
@@ -164,8 +164,8 @@ async function resolveMcpEndpoint(input: {
   if (!input.mcpConnectionId) return fallback;
 
   const agentConnection = input.agentConnectionId
-    ? getAgentConnectionWithSecrets(input.agentConnectionId)
-    : getDefaultAgentConnectionWithSecrets();
+    ? getAgentConnectionWithSecrets(input.agentConnectionId, userId)
+    : getDefaultAgentConnectionWithSecrets(userId);
   if (!agentConnection?.adminToken) return fallback;
 
   try {
@@ -319,10 +319,11 @@ export async function POST(req: NextRequest) {
   const mcpConnectionId = asString(rawMcpConnectionId);
 
   try {
+    const filterUserId = gate.auth.role === "superadmin" ? null : gate.auth.userId;
     const endpoint = await resolveMcpEndpoint({
       agentConnectionId: String(agentConnectionId || ""),
       mcpConnectionId: String(mcpConnectionId || ""),
-    });
+    }, filterUserId);
     const sid = await mcpInit(endpoint);
     let rid = 10;
 

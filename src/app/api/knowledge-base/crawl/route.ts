@@ -53,6 +53,16 @@ export async function POST(req: NextRequest) {
         let useCredentialWrapper = false;
 
         if (serverMode) {
+            if (taskId) {
+                const TASKS_FILE_PATH = path.join(stateDir(), "tasks.json");
+                const tasksData = await fs.readFile(TASKS_FILE_PATH, "utf-8").catch(() => "[]");
+                const tasks = JSON.parse(tasksData);
+                const task = tasks.find((t: any) => t.id === taskId);
+                if (task && gate.auth.role !== "superadmin" && task.createdByUserId !== gate.auth.userId) {
+                    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+                }
+            }
+
             if (apiKey && apiKey !== "[redacted]") {
                 return NextResponse.json({ error: "apiKey is not accepted in server mode" }, { status: 400 });
             }
@@ -479,6 +489,7 @@ export async function POST(req: NextRequest) {
                             processedFiles: processedFilesCount,
                             modelName: modelSelection,
                             type: "manual",
+                            createdByUserId: gate.auth.userId,
                             errorLog: code === 0 ? undefined : (fullErrorLog || "Unknown execution error").trim()
                         });
 

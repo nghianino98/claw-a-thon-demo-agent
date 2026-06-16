@@ -27,6 +27,7 @@ import {
   Play,
   Loader2,
   CheckCircle,
+  AlertTriangle,
 } from "lucide-react";
 
 export default function KnowledgePage() {
@@ -45,6 +46,75 @@ export default function KnowledgePage() {
   const [query, setQuery] = React.useState("");
   const [searching, setSearching] = React.useState(false);
   const [searchResults, setSearchResults] = React.useState<AgentSearchResult[]>([]);
+
+  // Folder sync state (browser upload folder -> delta sync sang agent đang connect)
+  const folderInputRef = React.useRef<HTMLInputElement | null>(null);
+  const [folderFiles, setFolderFiles] = React.useState<File[]>([]);
+  const [folderName, setFolderName] = React.useState("");
+  const [remotePrefix, setRemotePrefix] = React.useState("");
+  const [syncing, setSyncing] = React.useState(false);
+  type SyncResult = {
+    status: string;
+    changedCount?: number;
+    unchangedCount?: number;
+    totalLocalFiles?: number;
+    changedPreview?: string[];
+    error?: string;
+  };
+  const [syncResult, setSyncResult] = React.useState<SyncResult | null>(null);
+
+  const buildSyncFormData = React.useCallback(
+    (apply: boolean) => {
+      const fd = new FormData();
+      fd.append("apply", apply ? "true" : "false");
+      fd.append("remotePrefix", remotePrefix.trim());
+      fd.append("paths", JSON.stringify(folderFiles.map((f) => f.webkitRelativePath || f.name)));
+      for (const f of folderFiles) fd.append("files", f);
+      return fd;
+    },
+    [folderFiles, remotePrefix],
+  );
+
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const all = Array.from(e.target.files || []);
+    // Bỏ file ẩn (.DS_Store, .obsidian, .git ...) và chỉ giữ tài liệu text/markdown của KB.
+    const docExt = /\.(md|markdown|mdx|txt|csv|json|ya?ml)$/i;
+    const files = all.filter((f) => {
+      const rel = f.webkitRelativePath || f.name;
+      if (rel.split("/").some((seg) => seg.startsWith("."))) return false;
+      return docExt.test(f.name);
+    });
+    setFolderFiles(files);
+    setSyncResult(null);
+    const top = (files[0]?.webkitRelativePath || "").split("/")[0] || "";
+    setFolderName(top);
+    if (files.length === 0) toast.error(t("kbAdminSyncNoDocs") || "Folder không có file tài liệu (.md, .txt...).");
+  };
+
+  const runFolderSync = async (apply: boolean) => {
+    if (folderFiles.length === 0 || syncing) return;
+    setSyncing(true);
+    try {
+      const data = (await apiFetch("/api/agent-admin/kb/sync-folder", {
+        method: "POST",
+        body: buildSyncFormData(apply),
+      })) as SyncResult;
+      setSyncResult(data);
+      if (apply) {
+        if (data.status === "applied") {
+          toast.success((t("kbAdminSyncApplied") || "Đã đẩy {n} file thay đổi sang agent.").replace("{n}", String(data.changedCount ?? 0)));
+          setTimeout(loadVersions, 1500);
+        } else if (data.status === "no_changes") {
+          toast.success(t("kbAdminSyncNoChanges") || "Không có thay đổi — KB đã khớp folder.");
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(t("kbAdminSyncFailed") || "Đồng bộ folder thất bại.");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const loadVersions = React.useCallback(async () => {
     if (!selectedId) return;
@@ -229,6 +299,129 @@ export default function KnowledgePage() {
                   >
                     {t("kbAdminBtnStartUpload")}
                   </Button>
+                </div>
+              )}
+            </div>
+          </RoleGate>
+
+          {/* Sync từ folder (browser upload -> delta sang agent đang connect) */}
+          <RoleGate allowedRoles={["operator", "superadmin"]}>
+            <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm p-6 space-y-4">
+              <h3 className="text-base font-bold text-zinc-900 flex items-center gap-2">
+                <UploadCloud className="w-5 h-5 text-[--color-primary]" />
+                {t("kbAdminSyncFolderTitle") || "Đồng bộ từ folder"}
+              </h3>
+              <p className="text-xs text-zinc-500">
+                {t("kbAdminSyncFolderHint") ||
+                  "Chọn folder tri thức trên máy bạn. Trình duyệt sẽ đọc file và chỉ đẩy phần THAY ĐỔI (delta) sang agent đang kết nối — không xoá file ngoài folder."}
+              </p>
+
+              <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+                <span>
+                  {t("kbAdminSyncFolderWarn") ||
+                    "Lưu ý: delta đẩy lên agent đang chạy chỉ tồn tại tới lần restart kế tiếp (bộ nhớ của agent là tạm thời). Muốn KB thay đổi bền vững, phải re-bake seed vào image rồi deploy, hoặc bật S3 backup. Dùng folder-sync để cập nhật nhanh / test ngay."}
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="relative flex-1 border-2 border-dashed border-zinc-300 rounded-2xl p-5 text-center bg-zinc-50 hover:bg-zinc-100/50 transition-colors">
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    multiple
+                    // @ts-expect-error - thuộc tính không chuẩn cho phép chọn cả thư mục
+                    webkitdirectory=""
+                    directory=""
+                    onChange={handleFolderSelect}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                    disabled={syncing}
+                  />
+                  <Database className="w-8 h-8 text-zinc-400 mb-2 mx-auto" />
+                  {folderFiles.length > 0 ? (
+                    <p className="text-sm font-bold text-zinc-800">
+                      {folderName || "folder"} · {folderFiles.length} file
+                    </p>
+                  ) : (
+                    <p className="text-sm font-semibold text-zinc-700">
+                      {t("kbAdminSyncFolderPick") || "Click để chọn folder"}
+                    </p>
+                  )}
+                </div>
+                <div className="sm:w-64">
+                  <label className="block text-xs font-semibold text-zinc-600 mb-1">
+                    {t("kbAdminSyncPrefixLabel") || "KB path prefix (tuỳ chọn)"}
+                  </label>
+                  <input
+                    type="text"
+                    value={remotePrefix}
+                    onChange={(e) => setRemotePrefix(e.target.value)}
+                    placeholder="vd: 05. Knowledge"
+                    className="w-full text-sm border border-zinc-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[--color-primary]/30"
+                    disabled={syncing}
+                  />
+                  <p className="text-[11px] text-zinc-400 mt-1">
+                    {t("kbAdminSyncPrefixHint") || "Để trống nếu tên folder đã trùng đường dẫn KB."}
+                  </p>
+                </div>
+              </div>
+
+              {folderFiles.length > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => runFolderSync(false)}
+                    disabled={syncing}
+                    className="font-bold rounded-xl cursor-pointer"
+                  >
+                    {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    {t("kbAdminSyncPreviewBtn") || "Xem thay đổi"}
+                  </Button>
+                  {syncResult && (syncResult.status === "preview" || syncResult.status === "no_changes") && (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => runFolderSync(true)}
+                      disabled={syncing || (syncResult.changedCount ?? 0) === 0}
+                      className="font-bold rounded-xl cursor-pointer"
+                    >
+                      {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                      {(t("kbAdminSyncApplyBtn") || "Đồng bộ {n} file").replace("{n}", String(syncResult.changedCount ?? 0))}
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {syncResult && (
+                <div className="rounded-xl bg-zinc-50 border border-zinc-200 p-4 text-sm space-y-2">
+                  <div className="flex items-center gap-2 font-semibold text-zinc-800">
+                    {syncResult.status === "applied" ? (
+                      <CheckCircle className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <Info className="w-4 h-4 text-zinc-500" />
+                    )}
+                    <span>
+                      {syncResult.status === "applied"
+                        ? t("kbAdminSyncDone") || "Đã đẩy delta sang agent (đang index nền)."
+                        : syncResult.status === "no_changes"
+                          ? t("kbAdminSyncNoChanges") || "Không có thay đổi — KB đã khớp folder."
+                          : t("kbAdminSyncPreviewTitle") || "Xem trước thay đổi:"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-zinc-600">
+                    {(t("kbAdminSyncStats") || "Tổng: {total} · Thay đổi: {changed} · Không đổi: {same}")
+                      .replace("{total}", String(syncResult.totalLocalFiles ?? 0))
+                      .replace("{changed}", String(syncResult.changedCount ?? 0))
+                      .replace("{same}", String(syncResult.unchangedCount ?? 0))}
+                  </div>
+                  {(syncResult.changedPreview?.length ?? 0) > 0 && (
+                    <ul className="text-[11px] text-zinc-500 font-mono max-h-32 overflow-auto space-y-0.5">
+                      {syncResult.changedPreview!.map((p) => (
+                        <li key={p} className="truncate">+ {p}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
             </div>

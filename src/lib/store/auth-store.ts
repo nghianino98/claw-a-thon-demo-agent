@@ -6,6 +6,7 @@ export interface UserInfo {
   role: "superadmin" | "operator" | "viewer";
   mustChangePassword: boolean;
   hasTotp: boolean;
+  menuPermissions?: string[];
 }
 
 interface AuthState {

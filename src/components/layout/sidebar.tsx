@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { 
+import {
     Workflow,
     Search,
     Clock,
@@ -17,7 +17,7 @@ import {
     Network,
     Users,
     Settings,
-    ChevronLeft, 
+    ChevronLeft,
     Menu,
     LogOut,
     User,
@@ -31,7 +31,7 @@ export function Sidebar() {
     const router = useRouter();
     const t = useTranslation();
     const { authMode, user, clearAuth } = useAuth();
-    
+
     const [isCollapsed, setIsCollapsed] = useState(() => {
         if (typeof window === "undefined") return false;
         return localStorage.getItem("sidebar_collapsed") === "true";
@@ -77,11 +77,17 @@ export function Sidebar() {
 
     // 2. Navigation items for Server Mode (AUTH_MODE=required)
     const isSuperAdmin = user?.role === "superadmin";
+    const hasPermission = (href: string) => {
+        if (isSuperAdmin) return true;
+        return user?.menuPermissions?.includes(href) ?? false;
+    };
 
     const collectorSection = [
         { href: "/knowledge-base", label: t('navLookup'), icon: Search, active: isActive('/knowledge-base') },
         { href: "/history", label: t('navHistory'), icon: Clock, active: isActive('/history') },
-    ];
+    ].filter(item => hasPermission(item.href));
+
+    const workflowSectionFiltered = workflowSection.filter(item => hasPermission(item.href));
 
     const agentAdminSection = [
         { href: "/agent-admin/dashboard", label: t('navDashboard'), icon: Activity, active: isActive('/agent-admin/dashboard') },
@@ -90,16 +96,16 @@ export function Sidebar() {
         { href: "/agent-admin/instructions", label: t('navInstructions'), icon: FileText, active: isActive('/agent-admin/instructions') },
         { href: "/agent-admin/skills", label: t('navSkills'), icon: Puzzle, active: isActive('/agent-admin/skills') },
         { href: "/agent-admin/knowledge", label: t('navKnowledge'), icon: Database, active: isActive('/agent-admin/knowledge') },
-    ];
+    ].filter(item => hasPermission(item.href));
 
     const systemSection = [
         ...(isSuperAdmin ? [{ href: "/accounts", label: t('navAccounts'), icon: Users, active: isActive('/accounts') }] : []),
         { href: "/settings/mcp", label: t('navConnectMcp'), icon: Network, active: isActive('/settings/mcp') },
         { href: "/settings", label: t('navSettings'), icon: Settings, active: pathname === '/settings' },
-    ];
+    ].filter(item => hasPermission(item.href));
 
     return (
-        <aside 
+        <aside
             className={`sticky top-0 h-screen transition-all duration-300 border-r border-zinc-200 bg-white shadow-sm flex flex-col z-50 shrink-0 ${isCollapsed ? 'w-20' : 'w-64'}`}
         >
             {/* Header / Logo */}
@@ -112,7 +118,7 @@ export function Sidebar() {
                         <span className="truncate">Didi AI Tool</span>
                     </Link>
                 )}
-                <button 
+                <button
                     onClick={toggleSidebar}
                     className="p-2 hover:bg-gray-100 rounded-xl transition-colors text-gray-500 cursor-pointer"
                     title={isCollapsed ? "Expand" : "Collapse"}
@@ -143,8 +149,8 @@ export function Sidebar() {
                                             key={item.href}
                                             href={item.href}
                                             className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
-                                                item.active 
-                                                    ? 'bg-blue-50 text-[#0144DB]' 
+                                                item.active
+                                                    ? 'bg-blue-50 text-[#0144DB]'
                                                     : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
                                             }`}
                                             title={item.label}
@@ -161,108 +167,116 @@ export function Sidebar() {
                     /* Server Mode (AUTH_MODE=required) Grouped List */
                     <div className="space-y-6">
                         {/* 1. Collector Section */}
-                        <div className="space-y-1.5">
-                            {!isCollapsed && (
-                                <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
-                                    {t('secCollector')}
-                                </span>
-                            )}
-                            <nav className="space-y-1">
-                                {collectorSection.map((item) => (
-                                    <Link
-                                        key={item.href}
-                                        href={item.href}
-                                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
-                                            item.active 
-                                                ? 'bg-blue-50 text-[#0144DB]' 
-                                                : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
-                                        }`}
-                                        title={item.label}
-                                    >
-                                        <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
-                                        {!isCollapsed && <span className="truncate">{item.label}</span>}
-                                    </Link>
-                                ))}
-                            </nav>
-                        </div>
+                        {collectorSection.length > 0 && (
+                            <div className="space-y-1.5">
+                                {!isCollapsed && (
+                                    <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                                        {t('secCollector')}
+                                    </span>
+                                )}
+                                <nav className="space-y-1">
+                                    {collectorSection.map((item) => (
+                                        <Link
+                                            key={item.href}
+                                            href={item.href}
+                                            className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
+                                                item.active
+                                                    ? 'bg-blue-50 text-[#0144DB]'
+                                                    : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                                            }`}
+                                            title={item.label}
+                                        >
+                                            <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
+                                            {!isCollapsed && <span className="truncate">{item.label}</span>}
+                                        </Link>
+                                    ))}
+                                </nav>
+                            </div>
+                        )}
 
                         {/* 2. Workflow Section */}
-                        <div className="space-y-1.5">
-                            {!isCollapsed && (
-                                <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
-                                    {t('secWorkflow')}
-                                </span>
-                            )}
-                            <nav className="space-y-1">
-                                {workflowSection.map((item) => (
-                                    <Link
-                                        key={item.href}
-                                        href={item.href}
-                                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
-                                            item.active 
-                                                ? 'bg-blue-50 text-[#0144DB]' 
-                                                : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
-                                        }`}
-                                        title={item.label}
-                                    >
-                                        <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
-                                        {!isCollapsed && <span className="truncate">{item.label}</span>}
-                                    </Link>
-                                ))}
-                            </nav>
-                        </div>
+                        {workflowSectionFiltered.length > 0 && (
+                            <div className="space-y-1.5">
+                                {!isCollapsed && (
+                                    <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                                        {t('secWorkflow')}
+                                    </span>
+                                )}
+                                <nav className="space-y-1">
+                                    {workflowSectionFiltered.map((item) => (
+                                        <Link
+                                            key={item.href}
+                                            href={item.href}
+                                            className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
+                                                item.active
+                                                    ? 'bg-blue-50 text-[#0144DB]'
+                                                    : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                                            }`}
+                                            title={item.label}
+                                        >
+                                            <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
+                                            {!isCollapsed && <span className="truncate">{item.label}</span>}
+                                        </Link>
+                                    ))}
+                                </nav>
+                            </div>
+                        )}
 
                         {/* 3. Agent Admin Section */}
-                        <div className="space-y-1.5">
-                            {!isCollapsed && (
-                                <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
-                                    {t('secAgentAdmin')}
-                                </span>
-                            )}
-                            <nav className="space-y-1">
-                                {agentAdminSection.map((item) => (
-                                    <Link
-                                        key={item.href}
-                                        href={item.href}
-                                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
-                                            item.active 
-                                                ? 'bg-blue-50 text-[#0144DB]' 
-                                                : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
-                                        }`}
-                                        title={item.label}
-                                    >
-                                        <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
-                                        {!isCollapsed && <span className="truncate">{item.label}</span>}
-                                    </Link>
-                                ))}
-                            </nav>
-                        </div>
+                        {agentAdminSection.length > 0 && (
+                            <div className="space-y-1.5">
+                                {!isCollapsed && (
+                                    <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                                        {t('secAgentAdmin')}
+                                    </span>
+                                )}
+                                <nav className="space-y-1">
+                                    {agentAdminSection.map((item) => (
+                                        <Link
+                                            key={item.href}
+                                            href={item.href}
+                                            className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
+                                                item.active
+                                                    ? 'bg-blue-50 text-[#0144DB]'
+                                                    : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                                            }`}
+                                            title={item.label}
+                                        >
+                                            <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
+                                            {!isCollapsed && <span className="truncate">{item.label}</span>}
+                                        </Link>
+                                    ))}
+                                </nav>
+                            </div>
+                        )}
 
                         {/* 4. System Section */}
-                        <div className="space-y-1.5">
-                            {!isCollapsed && (
-                                <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
-                                    {t('secSystem')}
-                                </span>
-                            )}
-                            <nav className="space-y-1">
-                                {systemSection.map((item) => (
-                                    <Link
-                                        key={item.href}
-                                        href={item.href}
-                                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
-                                            item.active 
-                                                ? 'bg-blue-50 text-[#0144DB]' 
-                                                : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
-                                        }`}
-                                        title={item.label}
-                                    >
-                                        <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
-                                        {!isCollapsed && <span className="truncate">{item.label}</span>}
-                                    </Link>
-                                ))}
-                            </nav>
-                        </div>
+                        {systemSection.length > 0 && (
+                            <div className="space-y-1.5">
+                                {!isCollapsed && (
+                                    <span className="px-3 text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                                        {t('secSystem')}
+                                    </span>
+                                )}
+                                <nav className="space-y-1">
+                                    {systemSection.map((item) => (
+                                        <Link
+                                            key={item.href}
+                                            href={item.href}
+                                            className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-semibold transition-all group ${
+                                                item.active
+                                                    ? 'bg-blue-50 text-[#0144DB]'
+                                                    : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900'
+                                            }`}
+                                            title={item.label}
+                                        >
+                                            <item.icon className={`w-4 h-4 shrink-0 ${item.active ? 'text-[#0144DB]' : 'text-zinc-400 group-hover:text-zinc-600'}`} />
+                                            {!isCollapsed && <span className="truncate">{item.label}</span>}
+                                        </Link>
+                                    ))}
+                                </nav>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
@@ -287,7 +301,7 @@ export function Sidebar() {
                 /* Interactive User Menu in Server Mode */
                 <div className="p-4 border-t border-zinc-100 mt-auto relative shrink-0">
                     {/* User profile card toggle */}
-                    <div 
+                    <div
                         onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
                         className={`flex items-center gap-3 p-2 rounded-xl hover:bg-zinc-50 transition-all cursor-pointer select-none ${isCollapsed ? 'justify-center' : ''}`}
                     >
@@ -309,7 +323,7 @@ export function Sidebar() {
                     {/* Popover User Menu Options */}
                     {isUserMenuOpen && (
                         <div className={`absolute bottom-16 bg-white border border-zinc-200 rounded-xl shadow-xl py-2 w-48 flex flex-col z-[100] ${isCollapsed ? 'left-4' : 'left-4 right-4 w-auto'}`}>
-                            <Link 
+                            <Link
                                 href="/account"
                                 onClick={() => setIsUserMenuOpen(false)}
                                 className="flex items-center gap-2.5 px-4 py-2 text-xs font-bold text-zinc-700 hover:bg-zinc-50 hover:text-zinc-950 transition-all"
