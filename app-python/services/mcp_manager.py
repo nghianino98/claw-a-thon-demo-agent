@@ -227,7 +227,15 @@ class McpManager:
         elif config.transport == "http":
             if not config.base_url:
                 raise ValueError("http MCP server requires base_url")
-            read_stream, write_stream, _ = await stack.enter_async_context(streamable_http_client(config.base_url))
+            # Secrets with "header_" prefix become HTTP request headers
+            http_headers = {
+                k[len("header_"):]: v
+                for k, v in env.items()
+                if k.startswith("header_")
+            }
+            read_stream, write_stream, _ = await stack.enter_async_context(
+                streamable_http_client(config.base_url, headers=http_headers if http_headers else None)
+            )
         else:
             raise ValueError(f"Unsupported MCP transport: {config.transport}")
 
