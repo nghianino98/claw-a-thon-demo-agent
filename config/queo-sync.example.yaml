@@ -1,0 +1,22 @@
+server:
+  url: ${KB_SYNC_URL}
+  api_key_env: KB_SYNC_KEY
+  wait_seconds: 120
+
+sources:
+  wealth_knowledge:
+    enabled: true
+    path: ${WEALTH_KNOWLEDGE_DIR}
+    prefix: 05. Knowledge
+    watch: true
+    interval_seconds: 900
+    quiet_seconds: 300
+
+  # Example for another local folder that should appear under a stable KB prefix.
+  # fd_notes:
+  #   enabled: true
+  #   path: /absolute/path/to/fd-notes
+  #   prefix: 05. Knowledge/FD/Notes
+  #   watch: false
+  #   interval_seconds: 3600
+  #   quiet_seconds: 120

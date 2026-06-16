@@ -29,8 +29,15 @@ def excluded(path: Path, root: Path, no_media: bool) -> bool:
     return False
 
 
-def pack(source: Path, output: Path, no_media: bool) -> None:
+def normalize_prefix(prefix: str | None) -> str:
+    if not prefix:
+        return ""
+    return prefix.strip().strip("/")
+
+
+def pack(source: Path, output: Path, no_media: bool, prefix: str = "") -> None:
     source = source.resolve()
+    prefix = normalize_prefix(prefix)
     output.parent.mkdir(parents=True, exist_ok=True)
     files = 0
     bytes_in = 0
@@ -43,13 +50,15 @@ def pack(source: Path, output: Path, no_media: bool) -> None:
                 if path.is_symlink() or not path.is_file() or excluded(path, source, no_media):
                     continue
                 arcname = path.relative_to(source).as_posix()
+                if prefix:
+                    arcname = f"{prefix}/{arcname}"
                 zf.write(path, arcname)
                 files += 1
                 try:
                     bytes_in += path.stat().st_size
                 except OSError:
                     pass
-    print(f"packed files={files} bytes={bytes_in} output={output} size={output.stat().st_size}")
+    print(f"packed files={files} bytes={bytes_in} prefix={prefix or '-'} output={output} size={output.stat().st_size}")
 
 
 def main() -> int:
@@ -57,11 +66,11 @@ def main() -> int:
     parser.add_argument("source")
     parser.add_argument("output")
     parser.add_argument("--no-media", action="store_true")
+    parser.add_argument("--prefix", default="", help="Remote path prefix to prepend inside the zip")
     args = parser.parse_args()
-    pack(Path(args.source), Path(args.output), args.no_media)
+    pack(Path(args.source), Path(args.output), args.no_media, args.prefix)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
