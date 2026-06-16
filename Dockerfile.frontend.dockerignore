@@ -1,0 +1,25 @@
+# Build context cleanup for the frontend image (BuildKit reads <dockerfile>.dockerignore)
+# CRITICAL: exclude host node_modules so a wrong-arch native binary can't leak into the image.
+node_modules
+.next
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+/data
+bootstrap
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+.env
+.env.*
+.greennode.json
+.agentbase
+*.credentials.json
+tests
+docs
+greennode-agentbase-skills
+.DS_Store
