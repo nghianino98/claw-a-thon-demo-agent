@@ -101,6 +101,7 @@ class KBService:
         self.kb_root = settings.kb_dir
         self.versions_dir = self.kb_root / "versions"
         self.current_link = self.kb_root / "current"
+        self._active_version_cache: int | None | bool = False
 
     def ensure_dirs(self) -> None:
         self.versions_dir.mkdir(parents=True, exist_ok=True)
@@ -109,9 +110,15 @@ class KBService:
         (self.settings.state_dir / "backups").mkdir(parents=True, exist_ok=True)
 
     def active_version(self) -> int | None:
+        if self._active_version_cache is not False:
+            return self._active_version_cache  # type: ignore
         with self.db.connect() as conn:
             row = conn.execute("SELECT id FROM kb_versions WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
-        return int(row["id"]) if row else None
+        self._active_version_cache = int(row["id"]) if row else None
+        return self._active_version_cache
+
+    def clear_active_version_cache(self) -> None:
+        self._active_version_cache = False
 
     def status(self) -> dict[str, Any]:
         version = self.active_version()
@@ -195,6 +202,7 @@ class KBService:
             raise
 
     def activate_version(self, version_id: int) -> None:
+        self.clear_active_version_cache()
         version_path = self.versions_dir / str(version_id)
         if not version_path.exists():
             raise FileNotFoundError(str(version_path))
@@ -553,6 +561,7 @@ class KBService:
         shutil.copytree(source, target, ignore=self._ignore_names, copy_function=copy_function, symlinks=False)
 
     def _extract_zip(self, archive_path: Path, target: Path) -> None:
+        import time
         if target.exists():
             shutil.rmtree(target)
         target.mkdir(parents=True, exist_ok=True)
@@ -563,7 +572,9 @@ class KBService:
             infos = zf.infolist()
             if len(infos) > max_entries:
                 raise ValueError("Zip has too many entries")
-            for info in infos:
+            for idx, info in enumerate(infos):
+                if idx > 0 and idx % 200 == 0:
+                    time.sleep(0.01)
                 rel = Path(info.filename)
                 if info.is_dir():
                     continue
@@ -616,9 +627,19 @@ class KBService:
         return ignored
 
     def _index_version(self, version_id: int, root: Path) -> dict[str, int]:
+        import gc
+        import time
         stats = {"files": 0, "chunks": 0, "bytes": 0}
         with self.db.connect() as conn:
-            for file_path in self._iter_files(root):
+            for idx, file_path in enumerate(self._iter_files(root)):
+                if idx > 0 and idx % 200 == 0:
+                    conn.commit()
+                if idx > 0 and idx % 1000 == 0:
+                    gc.collect()
+                if idx > 0 and idx % 5 == 0:
+                    time.sleep(0.01)
+                if idx % 100 == 0:
+                    print(f"Index KB: processed {idx} files...", flush=True)
                 rel = file_path.relative_to(root).as_posix()
                 size = file_path.stat().st_size
                 sha = sha256_file(file_path)
@@ -1163,7 +1184,35 @@ class KBService:
                         break
         return safe_json(rows)
 
+    def clear_all(self) -> None:
+        self.clear_active_version_cache()
+        with self.db.connect() as conn:
+            conn.execute("DELETE FROM kb_files")
+            conn.execute("DELETE FROM kb_versions")
+            conn.execute("DELETE FROM chunks_fts")
+            conn.execute("DELETE FROM chunks_meta")
+            
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'")
+            if cursor.fetchone():
+                conn.execute("DELETE FROM chunk_embeddings")
+                
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sync_state'")
+            if cursor.fetchone():
+                conn.execute("UPDATE sync_state SET last_sync_at=NULL, last_result=NULL, last_error=NULL")
+                
+            conn.commit()
+            conn.execute("VACUUM")
+            
+        if self.versions_dir.exists():
+            shutil.rmtree(self.versions_dir)
+        if self.current_link.exists() or self.current_link.is_symlink():
+            self.current_link.unlink()
+        self.ensure_dirs()
+        self.reload_registries()
+
     def _cleanup_old_versions(self) -> None:
+        self.clear_active_version_cache()
         keep = max(1, self.settings.kb_keep_versions)
         with self.db.connect() as conn:
             rows = conn.execute("SELECT id FROM kb_versions ORDER BY id DESC").fetchall()
@@ -1221,12 +1270,7 @@ class KBService:
                 except OSError:
                     shutil.copy2(item, target)
 
-    async def apply_delta(self, archive_path: Path, meta: dict[str, Any], uploaded_by: str = "sync-api") -> int:
-        self.ensure_dirs()
-        active_id = self.active_version()
-        if not active_id:
-            raise ValueError("No active version to apply delta on")
-
+    def _apply_delta_sync(self, archive_path: Path, meta: dict[str, Any], uploaded_by: str, active_id: int, version_id: int, target: Path) -> tuple[int, int, dict[str, int], bool, str]:
         base_version = int(meta["base_version"])
         client_host = meta.get("client_host", "unknown")
         deleted = meta.get("deleted", [])
@@ -1237,15 +1281,12 @@ class KBService:
         added_modified = meta.get("added_modified", [])
         client_manifest_sha = meta.get("client_manifest_sha")
 
-        version_id = self._create_version(uploaded_by, archive_path.name)
         with self.db.connect() as conn:
             conn.execute(
                 "UPDATE kb_versions SET kind='delta', base_version=? WHERE id=?",
                 (base_version, version_id),
             )
             conn.commit()
-
-        target = self.versions_dir / str(version_id)
 
         try:
             active_path = self.versions_dir / str(active_id)
@@ -1434,6 +1475,36 @@ class KBService:
                 )
                 conn.commit()
 
+            return skills, workflows, change_summary, should_activate, now_str
+
+        except Exception as exc:
+            with self.db.connect() as conn:
+                conn.execute("UPDATE kb_versions SET status='failed', error=? WHERE id=?", (str(exc), version_id))
+                conn.commit()
+            raise
+
+    async def apply_delta(self, archive_path: Path, meta: dict[str, Any], uploaded_by: str = "sync-api") -> int:
+        import asyncio
+        self.ensure_dirs()
+        active_id = self.active_version()
+        if not active_id:
+            raise ValueError("No active version to apply delta on")
+
+        client_host = meta.get("client_host", "unknown")
+        version_id = self._create_version(uploaded_by, archive_path.name)
+        target = self.versions_dir / str(version_id)
+
+        try:
+            skills, workflows, change_summary, should_activate, now_str = await asyncio.to_thread(
+                self._apply_delta_sync,
+                archive_path,
+                meta,
+                uploaded_by,
+                active_id,
+                version_id,
+                target
+            )
+
             if self.telegram_client and self.telegram_client.configured and self.settings.telegram_owner_user_ids:
                 added_count = change_summary["added"]
                 modified_count = change_summary["modified"]
@@ -1591,10 +1662,13 @@ class KBService:
 
     @staticmethod
     def _chunk_text(text: str, path: str = "", max_chars: int = 1400, overlap: int = 180) -> list[tuple[str, int, int]]:
+        import time
         lines = text.splitlines()
         line_headings = []
         h1, h2, h3 = None, None, None
         for idx, line in enumerate(lines, start=1):
+            if idx % 1000 == 0:
+                time.sleep(0.001)
             stripped = line.strip()
             if stripped.startswith("# "):
                 h1 = stripped[2:].strip()
@@ -1610,6 +1684,8 @@ class KBService:
         buf: list[str] = []
         start = 1
         for idx, line in enumerate(lines, start=1):
+            if idx % 1000 == 0:
+                time.sleep(0.001)
             if line.strip():
                 if not buf:
                     start = idx
@@ -1648,17 +1724,32 @@ class KBService:
         current_end = 1
         current_bc = ""
 
-        for para, start_line, end_line, bc in paragraphs:
+        for idx, (para, start_line, end_line, bc) in enumerate(paragraphs):
+            if idx % 500 == 0:
+                time.sleep(0.001)
             prefix = f"[Breadcrumb: {bc}]\n\n" if bc else ""
             if len(prefix + para) > max_chars:
                 if current:
                     chunks.append((f"[Breadcrumb: {current_bc}]\n\n" + current if current_bc else current, current_start, current_end))
                     current = ""
+                
+                # Robustly calculate step and prefix to avoid infinite loops
+                local_bc = bc
+                local_prefix = prefix
+                if len(local_prefix) >= max_chars - 200:
+                    max_bc_len = max(50, max_chars - 200 - 16)
+                    local_bc = bc[:max_bc_len] + "..." if bc else ""
+                    local_prefix = f"[Breadcrumb: {local_bc}]\n\n" if local_bc else ""
+                
+                step = max_chars - len(local_prefix) - overlap
+                if step <= 0:
+                    step = max(100, max_chars - len(local_prefix))
+                
                 pos = 0
                 while pos < len(para):
-                    part = para[pos : pos + max_chars - len(prefix)]
-                    chunks.append((prefix + part.strip() if bc else part.strip(), start_line, end_line))
-                    pos += max_chars - len(prefix) - overlap
+                    part = para[pos : pos + max_chars - len(local_prefix)]
+                    chunks.append((local_prefix + part.strip() if local_bc else part.strip(), start_line, end_line))
+                    pos += step
                 continue
 
             if not current:
