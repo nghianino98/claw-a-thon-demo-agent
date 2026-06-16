@@ -90,6 +90,11 @@ class AgentLoop:
             self._raise_if_cancelled(ctx)
             if not self.settings.has_llm:
                 reply = await self._fallback(ctx)
+            elif ctx.mode == "qa":
+                # Câu hỏi KB thường: dùng RAG 1-shot (1 lần gọi LLM) thay vì agent loop
+                # nhiều vòng tool — nhanh và tránh ReadTimeout với model MaaS chậm.
+                # Agent loop đa bước chỉ dành cho mode "deep".
+                reply = await self._run_retrieval_qa(ctx, history, started, loop_model, task_class)
             elif mode == "json":
                 reply = await self._run_json(ctx, history, started, loop_model, task_class)
             else:
@@ -142,7 +147,7 @@ class AgentLoop:
                 messages,
                 tools=None,
                 temperature=temperature_for_mode(ctx.mode),
-                timeout=min(18, self._llm_timeout_for_mode(ctx.mode, started)),
+                timeout=min(45, self._llm_timeout_for_mode(ctx.mode, started)),
                 user_id=ctx.user_id,
                 task_class=task_class,
             )
@@ -565,6 +570,10 @@ class AgentLoop:
     def _clean_kb_excerpt(text: str) -> str:
         text = clean_user_visible_text(text)
         text = re.sub(r"(?m)^\s*\d+:\s*", "", text)
+        text = re.sub(r"\[Breadcrumb:[^\]]*\]", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bBreadcrumb:\s*.*?\.md\b", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\S*%[0-9A-Fa-f]{2}\S*", " ", text)
+        text = re.sub(r"\b\d*[A-Za-z]*Drive/\S*", " ", text)
         text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
         text = re.sub(r"\bimage[-=]\d{4}-\d{2}-\d{2}[-\w.]*\s*(?:\|\s*)?(?:width|height)=[^\s]+", " ", text)
         text = re.sub(r"\b(?:width|height)=\d+[!,]?", " ", text)
