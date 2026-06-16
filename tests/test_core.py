@@ -319,7 +319,7 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn("FD.md", reply.text)
             self.assertIn("05. Knowledge/FD/FD.md", reply.citations)
 
-    def test_agent_loop_qa_uses_agentic_tool_loop(self):
+    def test_agent_loop_deep_uses_agentic_tool_loop(self):
         with tempfile.TemporaryDirectory() as td:
             services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
             fake = FakeLLM(
@@ -340,13 +340,69 @@ class CoreTests(unittest.TestCase):
             )
             services["loop"].llm = fake
 
-            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+            # Mode "deep" vẫn dùng agentic tool loop nhiều vòng.
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "deep")))
 
             self.assertEqual(reply.mode, "native")
             self.assertIn("FD", reply.text)
             self.assertIn("05. Knowledge/FD/FD.md", reply.citations)
             self.assertEqual(len(fake.calls), 2)
             self.assertIsNotNone(fake.calls[0]["tools"])
+
+    def test_agent_loop_qa_uses_retrieval_single_shot(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # RAG 1-shot: chỉ một lần gọi LLM, dùng content trả về trực tiếp (không tool loop).
+            fake = FakeLLM(
+                [
+                    LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn.", usage={"prompt_tokens": 1, "completion_tokens": 1}),
+                ]
+            )
+            services["loop"].llm = fake
+
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+
+            self.assertEqual(reply.mode, "retrieval")
+            self.assertIn("FD", reply.text)
+            self.assertIn("05. Knowledge/FD/FD.md", reply.citations)
+            self.assertEqual(len(fake.calls), 1)
+            # RAG synthesis call không truyền tool schema cho model.
+            self.assertIsNone(fake.calls[0]["tools"])
+
+    def test_retrieval_qa_retries_with_compact_context_on_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # Lần 1 timeout → retry context rút gọn → lần 2 thành công.
+            fake = FakeLLM(
+                [
+                    RuntimeError("LLM request failed within 70s: ReadTimeout"),
+                    LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn."),
+                ]
+            )
+            services["loop"].llm = fake
+
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+
+            self.assertEqual(reply.mode, "retrieval")
+            self.assertIn("FD", reply.text)
+            self.assertEqual(len(fake.calls), 2)
+
+    def test_retrieval_qa_does_not_retry_on_rate_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # 429 = rate-limit → KHÔNG retry, đi thẳng fallback (chỉ 1 lần gọi).
+            fake = FakeLLM(
+                [
+                    RuntimeError("LLM request failed: transient HTTP 429"),
+                    LLMResponse(content="không nên gọi tới đây"),
+                ]
+            )
+            services["loop"].llm = fake
+
+            reply = asyncio.run(services["loop"].run(AgentContext("u", "s", "FD là gì?", "qa")))
+
+            self.assertEqual(reply.mode, "fallback")
+            self.assertEqual(len(fake.calls), 1)
 
     def test_deep_command_uses_deep_budget_and_strips_prefix(self):
         with tempfile.TemporaryDirectory() as td:
@@ -491,31 +547,10 @@ class CoreTests(unittest.TestCase):
     def test_retry_followup_reuses_last_substantive_user_query(self):
         with tempfile.TemporaryDirectory() as td:
             services = build_test_services(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+            # qa mode = RAG 1-shot → mỗi lượt chỉ 1 lần gọi LLM với content trực tiếp.
             fake = FakeLLM(
                 [
-                    LLMResponse(
-                        content="",
-                        tool_calls=[ToolCall(id="1", name="kb_search", arguments={"query": "FD", "top_k": 1})],
-                        raw_message={
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {"id": "1", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
-                            ],
-                        },
-                    ),
                     LLMResponse(content="FD là sản phẩm tiền gửi có kỳ hạn."),
-                    LLMResponse(
-                        content="",
-                        tool_calls=[ToolCall(id="2", name="kb_search", arguments={"query": "FD", "top_k": 1})],
-                        raw_message={
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [
-                                {"id": "2", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
-                            ],
-                        },
-                    ),
                     LLMResponse(content="Mình tổng hợp lại FD theo KB."),
                 ]
             )
@@ -528,12 +563,13 @@ class CoreTests(unittest.TestCase):
                 services["router"].handle(IncomingMessage(user_id="u", session_id="s", text="Thử lại giúp mình", channel="test"))
             )
 
-            self.assertEqual(first.mode, "native")
-            self.assertEqual(retry.mode, "native")
+            self.assertEqual(first.mode, "retrieval")
+            self.assertEqual(retry.mode, "retrieval")
             self.assertIn("FD", retry.text)
-            self.assertEqual(len(fake.calls), 4)
-            self.assertIn("FD là gì?", fake.calls[2]["messages"][-1]["content"])
-            self.assertNotIn("Thử lại giúp mình", fake.calls[2]["messages"][-1]["content"])
+            self.assertEqual(len(fake.calls), 2)
+            # Lượt retry phải tái sử dụng câu hỏi gốc "FD là gì?", không phải "Thử lại giúp mình".
+            self.assertIn("FD là gì?", fake.calls[1]["messages"][-1]["content"])
+            self.assertNotIn("Thử lại giúp mình", fake.calls[1]["messages"][-1]["content"])
 
     def test_guardrail_blocks_before_llm(self):
         with tempfile.TemporaryDirectory() as td:
@@ -687,7 +723,7 @@ class CoreTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(second.mode, "native")
+            self.assertEqual(second.mode, "retrieval")
             self.assertIn("FD", second.text)
             self.assertEqual(fake_engine.started, [])
             state = services["loop"].memory.get_session_state("u", "s")
@@ -752,19 +788,9 @@ class CoreTests(unittest.TestCase):
         async def run():
             with tempfile.TemporaryDirectory() as td:
                 stack = build_telegram_test_stack(Path(td), LLM_BASE_URL="http://llm", LLM_MODEL="model")
+                # qa mode = RAG 1-shot → một lần gọi LLM, dùng content trực tiếp.
                 fake = FakeLLM(
                     [
-                        LLMResponse(
-                            content="",
-                            tool_calls=[ToolCall(id="1", name="kb_search", arguments={"query": "FD", "top_k": 1})],
-                            raw_message={
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": [
-                                    {"id": "1", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
-                                ],
-                            },
-                        ),
                         LLMResponse(content="Chào bạn, mình trả lời từ KB."),
                     ]
                 )
@@ -815,19 +841,9 @@ class CoreTests(unittest.TestCase):
                 state = stack["memory"].get_session_state("tg-200", "tg-chat-300")
                 self.assertEqual(state["active_skill"], "research-skill")
 
+                # qa mode = RAG 1-shot → một lần gọi LLM, dùng content trực tiếp.
                 fake = FakeLLM(
                     [
-                        LLMResponse(
-                            content="",
-                            tool_calls=[ToolCall(id="1", name="kb_search", arguments={"query": "FD", "top_k": 1})],
-                            raw_message={
-                                "role": "assistant",
-                                "content": None,
-                                "tool_calls": [
-                                    {"id": "1", "type": "function", "function": {"name": "kb_search", "arguments": "{\"query\":\"FD\"}"}}
-                                ],
-                            },
-                        ),
                         LLMResponse(content="Kết quả theo skill."),
                     ]
                 )
