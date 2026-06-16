@@ -6,7 +6,7 @@
 |---|---|---|---|
 | **0** | **🔴 KHẨN: token công ty trong git Didi** | ⬜ **LÀM NGAY, trước mọi việc khác** | `data/tasks.json` (53 apiKey Confluence/Jira/GitLab plaintext) đã push lên GitHub private repo `duynq0211/Didi-Ai-Tool`. Việc: revoke/tạo lại toàn bộ token → `git rm --cached data/*.json data/data` + ignore `data/` → purge history (`git filter-repo`) → force push. Kèm quick-win: thêm `--hostname 127.0.0.1` vào `next start`/`next dev` trong `Start App.command` (app đang bind 0.0.0.0 ra LAN). Chi tiết: `CODE-REVIEW-2026-06-11.md` §A |
 | 1 | Telegram bot | ✅ Dùng bot **hiện có** (bot của demo Mây) | KHÔNG cần tạo bot mới. **BẮT BUỘC trước go-live: regenerate token** qua BotFather (`/mybots` → bot → API Token → Revoke) vì token hiện tại đã từng được chia sẻ qua chat/cấu hình demo → coi như đã lộ. Token mới chỉ điền trực tiếp vào env trên AgentBase console — không ghi vào file/git/chat. Lưu ý: regenerate xong webhook cũ của demo Mây sẽ chết (chấp nhận — demo ngừng dùng). |
-| 2 | Owner Telegram ID | ✅ `TELEGRAM_OWNER_USER_IDS=5927113595` (Duy) | Thêm owner khác sau qua env hoặc Admin UI |
+| 2 | Owner Telegram ID | ✅ `TELEGRAM_OWNER_USER_IDS=<telegram-user-id>` | Thêm owner khác sau qua env hoặc Admin UI |
 | 3 | Backup S3 | ✅ Quyết định: **CÓ — dùng VNG vStorage (S3-compatible)** | Việc cần làm ở M5: tạo bucket trên VNG Cloud console (project HCM), lấy endpoint + access/secret key → điền `S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY` vào env runtime |
 | 4 | Persona Quéo | ✅ Đã chốt, ghi tại `02-AGENT-CORE.md` §2.1 | Trợ lý tri thức nội bộ toàn diện cho CEO, Business, Product, Developer, QE |
 | 5 | Model MaaS | ⬜ CHƯA chốt | Làm đầu M1: `aip.sh models list` (model BTC đã bật) → chạy `scripts/probe_model.py` → ghi kết quả vào `IMPLEMENTATION_NOTES.md`. API key AI Portal do BTC cấp đã có (trong tài liệu BTC / `.env` demo — không chép vào docs) |
@@ -17,7 +17,7 @@
 | 10 | Secrets sinh mới khi deploy | ⬜ | Agent: `AGENT_API_KEY`, `AGENT_ADMIN_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` (≥32 hex), `SYNC_API_KEY`. Didi (D4): `DIDI_APP_SECRET`, `DIDI_BOOTSTRAP_PASSWORD` — sinh bằng `openssl rand -hex 32`, chỉ điền vào env runtime console; cặp bootstrap xóa khỏi env sau lần đăng nhập đầu |
 | 11 | Danh sách user được allow ban đầu | ⬜ | Duy gom Telegram ID của team Wealth (CEO/Business/Product/Dev/QE) → seed `TELEGRAM_ALLOWED_USER_IDS` hoặc duyệt dần qua nút approve |
 | 12 | Danh sách tài khoản admin + role (trên Didi) | ⬜ | Duy = superadmin (duy nhất, cài app TOTP như Google Authenticator). Ai được operator (vận hành KB/workflow + crawl)? Ai viewer? Cấp tài khoản qua trang Accounts của Didi sau D1. Kèm: CIDR VPN/văn phòng cho `DIDI_IP_ALLOWLIST` nếu có |
-| 13 | Verify mạng: GreenNode → Confluence/Jira/GitLab nội bộ | ⬜ LÀM SỚM (đầu D4, có thể test trước bằng runtime demo) | 1 lệnh curl từ runtime tới `confluence.zalopay.vn`. Không thông → crawl giữ local mode (kiến trúc đã chống sẵn — `07` §8), không blocker nhưng đổi kỳ vọng demo |
+| 13 | Verify mạng: GreenNode → hệ thống nội bộ | ⬜ LÀM SỚM (đầu D4, có thể test trước bằng runtime demo) | 1 lệnh curl từ runtime tới `<internal-confluence-host>`. Không thông → crawl giữ local mode (kiến trúc đã chống sẵn — `07` §8), không blocker nhưng đổi kỳ vọng demo |
 
 ## Quy tắc secret (nhắc lại từ `00` §5)
 

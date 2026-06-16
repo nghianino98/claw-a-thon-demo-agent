@@ -13,6 +13,7 @@ __pycache__/
 .agentbase/
 .agentbase-state.json
 *.credentials.json
+.last_image
 
 /data/
 /bootstrap/

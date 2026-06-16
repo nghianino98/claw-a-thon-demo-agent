@@ -115,6 +115,54 @@ class ApiTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_mcp_mutations_require_superadmin(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as td:
+                settings = Settings(
+                    APP_ENV="development",
+                    STATE_DIR=str(Path(td) / "state"),
+                    AGENT_API_KEY="test-key",
+                    AGENT_ADMIN_TOKEN="admin-token",
+                    TELEGRAM_OWNER_USER_IDS="100",
+                    TELEGRAM_MODE="webhook",
+                )
+                app = create_app(settings)
+                transport = httpx.ASGITransport(app=app)
+                async with app.router.lifespan_context(app):
+                    payload = {
+                        "server_id": "local-tools",
+                        "name": "Local Tools",
+                        "prefix": "local",
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "example-mcp"],
+                        "enabled": False,
+                    }
+                    operator_headers = {
+                        "Authorization": "Bearer admin-token",
+                        "X-Acting-User": "duy",
+                        "X-Acting-Role": "operator",
+                    }
+                    superadmin_headers = {
+                        "Authorization": "Bearer admin-token",
+                        "X-Acting-User": "duy",
+                        "X-Acting-Role": "superadmin",
+                    }
+                    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                        denied = await client.post("/admin/api/mcp/servers", headers=operator_headers, json=payload)
+                        self.assertEqual(denied.status_code, 403)
+
+                        allowed = await client.post("/admin/api/mcp/servers", headers=superadmin_headers, json=payload)
+                        self.assertEqual(allowed.status_code, 200)
+
+                        test_denied = await client.post(
+                            "/admin/api/mcp/servers/local-tools/test",
+                            headers=operator_headers,
+                        )
+                        self.assertEqual(test_denied.status_code, 403)
+
+        asyncio.run(run())
+
     def test_kb_upload_backup_trigger_respects_activate_flag(self):
         class FakeBackup:
             enabled = True
