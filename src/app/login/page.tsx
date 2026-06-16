@@ -11,7 +11,7 @@ import { Workflow, Key, User, ShieldCheck } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { setAuth, authMode, authenticated } = useAuth();
+  const { setAuth, authMode, authenticated, status } = useAuth();
 
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
@@ -23,10 +23,11 @@ export default function LoginPage() {
 
   // If already authenticated and not required to change password, redirect to home
   React.useEffect(() => {
+    if (status !== "ready") return;
     if (authMode === "off" || authenticated) {
       router.replace("/knowledge-base");
     }
-  }, [authMode, authenticated, router]);
+  }, [status, authMode, authenticated, router]);
 
   // Lockout countdown timer
   React.useEffect(() => {

@@ -208,9 +208,6 @@ const migrations: Migration[] = [
 function seedBootstrapUser(db: Database.Database) {
   if ((process.env.AUTH_MODE || "off") !== "required") return;
 
-  const row = db.prepare("SELECT COUNT(*) AS count FROM admin_users").get() as { count: number };
-  if (row.count > 0) return;
-
   const username = process.env.DIDI_BOOTSTRAP_USER;
   const password = process.env.DIDI_BOOTSTRAP_PASSWORD;
   if (!username || !password || password.length < 12) {
@@ -220,11 +217,20 @@ function seedBootstrapUser(db: Database.Database) {
   }
 
   const t = now();
+  // Always upsert the bootstrap user so password stays in sync with env vars across deploys
   db.prepare(`
     INSERT INTO admin_users (
       username, password_hash, role, status, must_change_password, failed_attempts,
       created_by, created_at, updated_at
-    ) VALUES (?, ?, 'superadmin', 'active', 1, 0, 'system', ?, ?)
+    ) VALUES (?, ?, 'superadmin', 'active', 0, 0, 'system', ?, ?)
+    ON CONFLICT(username) DO UPDATE SET
+      password_hash = excluded.password_hash,
+      status = 'active',
+      failed_attempts = 0,
+      locked_until = NULL,
+      must_change_password = 0,
+      totp_secret = NULL,
+      updated_at = excluded.updated_at
   `).run(username, hashPasswordSync(password), t, t);
 }
 
