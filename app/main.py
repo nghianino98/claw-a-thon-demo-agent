@@ -661,7 +661,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services: Services = request.app.state.services
         return {"status": "success", "servers": [serialize_mcp_server(item) for item in services.mcp.list_servers()]}
 
-    @app.post("/admin/api/mcp/servers", dependencies=[Depends(require_admin_operator)])
+    @app.post("/admin/api/mcp/servers", dependencies=[Depends(require_admin_superadmin)])
     async def admin_mcp_create_server(request: Request, body: McpServerCreate):
         services: Services = request.app.state.services
         actor = auth_actor(request, "admin-api")
@@ -679,7 +679,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="MCP server was not saved")
         return {"status": "success", "server": serialize_mcp_server(saved)}
 
-    @app.patch("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_operator)])
+    @app.patch("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_superadmin)])
     async def admin_mcp_patch_server(request: Request, server_id: str, body: McpServerUpdate):
         services: Services = request.app.state.services
         existing = services.mcp.get_server(server_id)
@@ -712,7 +712,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="MCP server was not saved")
         return {"status": "success", "server": serialize_mcp_server(saved)}
 
-    @app.delete("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_operator)])
+    @app.delete("/admin/api/mcp/servers/{server_id}", dependencies=[Depends(require_admin_superadmin)])
     async def admin_mcp_delete_server(request: Request, server_id: str):
         services: Services = request.app.state.services
         if not services.mcp.get_server(server_id):
@@ -723,7 +723,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await services.mcp.reload()
         return {"status": "success"}
 
-    @app.put("/admin/api/mcp/servers/{server_id}/secret", dependencies=[Depends(require_admin_operator)])
+    @app.put("/admin/api/mcp/servers/{server_id}/secret", dependencies=[Depends(require_admin_superadmin)])
     async def admin_mcp_set_secret(request: Request, server_id: str, body: McpSecretUpdate):
         services: Services = request.app.state.services
         actor = auth_actor(request, "admin-api")
@@ -741,7 +741,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await services.mcp.reload()
         return {"status": "success", "server_id": server_id, "secret_key": body.secret_key}
 
-    @app.post("/admin/api/mcp/servers/{server_id}/test", dependencies=[Depends(require_admin_operator)])
+    @app.post("/admin/api/mcp/servers/{server_id}/test", dependencies=[Depends(require_admin_superadmin)])
     async def admin_mcp_test_server(request: Request, server_id: str):
         services: Services = request.app.state.services
         result = await services.mcp.test_server(server_id)

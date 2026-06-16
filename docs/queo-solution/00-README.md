@@ -3,7 +3,7 @@
 > Agent AI cho Zalopay Wealth Solution: hỏi đáp knowledge base theo skill, tự chạy workflow đa bước, có admin tool cấu hình, hoạt động trên Telegram với bảo mật default-deny, deploy trên GreenNode AgentBase.
 
 **Phiên bản:** 1.7 — 2026-06-11 (+Model Router M4b; +Conversation Context M4c; +Retrieval v2 & deep mode M4d; +ẩn nguồn khỏi câu trả lời `02` §2.1/§2.3; +Guardrail bảo mật từ chối tuyệt đối `02` §2.2; +Role-persistence `02` §8.2)
-**Người duyệt:** Duy (duynq5@vng.com.vn)
+**Người duyệt:** Reviewer nội bộ
 **Trạng thái:** Approved for implementation
 
 ---
@@ -86,5 +86,4 @@
 | **MaaS** | GreenNode Model-as-a-Service, endpoint OpenAI-compatible |
 | **AgentBase** | Nền tảng runtime của GreenNode để host container agent |
 | **STATE_DIR** | Thư mục dữ liệu bền của container (mặc định `/data`) |
-
 

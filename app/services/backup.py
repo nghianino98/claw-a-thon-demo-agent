@@ -134,12 +134,16 @@ class BackupService:
                 dctx.copy_stream(fh_in, fh_out)
 
             try:
+                state_root = self.settings.state_dir.resolve()
                 with tarfile.open(temp_tar_path, "r") as tar:
-                    for member in tar:
-                        target_path = (self.settings.state_dir / member.name).resolve()
-                        if not target_path.is_relative_to(self.settings.state_dir.resolve()):
+                    members = tar.getmembers()
+                    for member in members:
+                        if member.issym() or member.islnk() or member.isdev():
+                            raise ValueError(f"Unsafe tar member blocked: {member.name}")
+                        target_path = (state_root / member.name).resolve()
+                        if not target_path.is_relative_to(state_root):
                             raise ValueError(f"Path traversal detected: {member.name}")
-                    tar.extractall(path=self.settings.state_dir)
+                    tar.extractall(path=state_root, members=members, filter="data")
             finally:
                 if temp_tar_path.exists():
                     temp_tar_path.unlink()

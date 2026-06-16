@@ -14,7 +14,7 @@ python3 -m venv .venv
 pip install -r requirements.txt
 cp .env.example .env
 python -m app.cli migrate
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
 ```
 
 Index a KB folder:

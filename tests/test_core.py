@@ -1120,6 +1120,42 @@ class BackupAndDeltaTests(unittest.TestCase):
                 self.assertTrue(hits)
                 self.assertEqual(hits[0].path, "05. Knowledge/FD/FD.md")
 
+    def test_restore_rejects_tar_links(self):
+        import io
+        import tarfile
+        import unittest.mock
+
+        import zstandard as zstd
+        from app.services.backup import BackupService
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            settings = make_settings(
+                tmp / "state",
+                S3_ENDPOINT="http://mock-s3",
+                S3_BUCKET="queo-bucket",
+                S3_ACCESS_KEY="access",
+                S3_SECRET_KEY="secret",
+            )
+            db = Database(settings.db_path)
+            run_migrations(db)
+            mock_s3 = MockS3Client()
+
+            tar_buffer = io.BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+                link = tarfile.TarInfo("kb/current")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside"
+                tar.addfile(link)
+            compressed = zstd.ZstdCompressor(level=3).compress(tar_buffer.getvalue())
+            key = "queo-backups/queo-malicious.tar.zst"
+            mock_s3.files[key] = compressed
+
+            with unittest.mock.patch("boto3.client", return_value=mock_s3):
+                backup_service = BackupService(db, settings)
+                with self.assertRaises(ValueError):
+                    backup_service.restore(key)
+
     def test_delta_sync(self):
         import zipfile
         import hashlib

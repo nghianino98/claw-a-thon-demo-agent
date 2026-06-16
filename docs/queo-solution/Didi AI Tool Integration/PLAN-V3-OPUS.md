@@ -2,7 +2,7 @@
 
 **Trạng thái:** Bản coding-ready chính thức. Hợp nhất Codex V2 + Opus review.
 **Supersedes:** `PLAN.md` (V1), `PLAN-V2-CODEX-REVIEW.md` (V2). Giữ V1/V2 làm tham chiếu lịch sử; **V3 là bản code theo**.
-**Người duyệt:** Duy (duynq5@vng.com.vn) · **Ngày:** 2026-06-14
+**Người duyệt:** Reviewer nội bộ · **Ngày:** 2026-06-14
 
 V2 (Codex) đã sửa đúng ~10/12 finding của Opus V1 (bootstrap fail-fast, RBAC matcher chính xác, CSRF, security headers, CIDR, vault resolve, wrapper `runpy`, milestone + acceptance, streaming upload). V3 **giữ nguyên toàn bộ phần đúng của V2** và bổ sung các correctness rule mà V2 còn sót — trong đó có **1 bug bảo mật thực sự đã được chứng minh bằng test** (session hết hạn vẫn được chấp nhận). Mọi code skeleton trong V3 đã **chạy thử trong sandbox** (Node 22), đánh dấu ✅ verified.
 
