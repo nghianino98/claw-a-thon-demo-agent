@@ -35,6 +35,7 @@ class ToolRegistry:
         self.skills = skills
         self.query_expander: QueryExpander | None = None
         self._tools = self._build()
+        self._external_tools: dict[str, set[str]] = {}
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
@@ -64,6 +65,27 @@ class ToolRegistry:
             return result
         except Exception as exc:
             return safe_json({"error": str(exc)[:300]})
+
+    def register_external(self, owner: str, specs: list[ToolSpec]) -> None:
+        self.unregister_external_owner(owner)
+        registered: set[str] = set()
+        for spec in specs:
+            self._tools[spec.name] = spec
+            registered.add(spec.name)
+        self._external_tools[owner] = registered
+
+    def unregister_external_owner(self, owner: str) -> None:
+        for name in self._external_tools.pop(owner, set()):
+            self._tools.pop(name, None)
+
+    def unregister_prefix(self, prefix: str) -> None:
+        names = [name for name in self._tools if name.startswith(f"{prefix}__")]
+        for name in names:
+            self._tools.pop(name, None)
+        for owner, owned_names in list(self._external_tools.items()):
+            owned_names.difference_update(names)
+            if not owned_names:
+                self._external_tools.pop(owner, None)
 
     def _build(self) -> dict[str, ToolSpec]:
         return {
