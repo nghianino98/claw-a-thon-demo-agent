@@ -23,16 +23,8 @@ export function AuthWrapper({ children }: { children: React.ReactNode }) {
       if (pathname !== "/login" && !pathname.startsWith("/api/")) {
         router.replace("/login");
       }
-    } else if (user?.mustChangePassword) {
-      if (pathname !== "/change-password") {
-        router.replace("/change-password");
-      }
-    } else if (!user?.hasTotp) {
-      if (pathname !== "/setup-2fa") {
-        router.replace("/setup-2fa");
-      }
     } else {
-      // Authenticated, 2FA enabled, password changed
+      // Authenticated
       const isSuperAdmin = user?.role === "superadmin";
       const allowedMenus = user?.menuPermissions || [];
       const CONFIGURABLE_MENUS = [

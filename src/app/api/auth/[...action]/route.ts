@@ -148,11 +148,7 @@ async function login(request: NextRequest) {
 
   const response = NextResponse.json({
     success: true,
-    nextStep: user.mustChangePassword
-      ? "change_password"
-      : process.env.DIDI_REQUIRE_2FA !== "false" && !user.totpSecret
-        ? "setup_2fa"
-        : "app",
+    nextStep: "app",
     user: {
       id: user.id,
       username: user.username,
