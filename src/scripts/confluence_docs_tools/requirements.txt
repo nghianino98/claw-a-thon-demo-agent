@@ -1,0 +1,6 @@
+requests==2.31.0
+markdownify==0.11.6
+weasyprint==61.2
+urllib3==2.1.0
+python-gitlab==4.4.0
+jira==3.6.0

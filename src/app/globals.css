@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* ZaloPay Design System Tokens */
+  --color-zalopay-blue: #0144DB;
+  --color-zalopay-green: #33D387;
+  --color-zalopay-yellow: #FED200;
+  --color-zalopay-orange: #FF8647;
+  --color-zalopay-cyan: #00BFFF;
+  --color-zalopay-bg: #F4F5F7;
+
+  /* Semantic tokens */
+  --color-primary: #0144DB;          /* ZaloPay blue */
+  --color-primary-soft: #E8EEFE;     /* Nền active */
+  --color-surface: #FFFFFF;          /* Card */
+  --color-surface-muted: #F4F5F7;    /* Page bg = zalopay-bg */
+  --color-border: #E5E7EB;           /* Zinc-200 */
+  --color-success: #16A34A;
+  --color-success-soft: #DCFCE7;
+  --color-danger:  #DC2626;
+  --color-danger-soft:  #FEE2E2;
+  --color-warning: #D97706;
+  --color-warning-soft: #FEF3C7;
+
+  /* Radii & elevation */
+  --radius-card: 1rem;       /* rounded-2xl */
+  --radius-control: 0.75rem; /* rounded-xl */
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 3px 0 rgb(0 0 0 / 0.06);
+
+  --animate-heartbeat: heartbeat 2s ease-in-out infinite;
+  --animate-slide-in-left: slide-in-left 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+
+@keyframes fade-in-up {
+  0% {
+    opacity: 0;
+    transform: translateY(15px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Khóa light mode bằng cách không áp dụng dark mode tự động của prefers-color-scheme */
+/* @media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+} */
+
+html,
+body {
+  max-width: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@keyframes heartbeat {
+
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes slide-in-left {
+  0% {
+    transform: translateX(-100vw);
+    opacity: 0;
+  }
+
+  80% {
+    transform: translateX(10px);
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}

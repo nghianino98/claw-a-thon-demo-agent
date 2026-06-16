@@ -1,32 +1,75 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
 
-.env
-.env.*
-!.env.example
-.greennode.json
-.agentbase/
-.agentbase-state.json
-*.credentials.json
-.last_image
+# Next.js build output
+/.next/
+/out/
 
-/data/
-/bootstrap/
-/scratch/
-*.zip
-!seed/kb-seed.zip
-*.sqlite3
-*.sqlite3-*
-
+# Python virtual environment
 .venv/
 venv/
 *.egg-info/
 dist/
 build/
-.DS_Store
 
+# Testing & Coverage
+/coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Env files
+.env
+.env.*
+.env*
+!.env.example
+
+# Credentials & runtime configuration
+.greennode.json
+.agentbase/
+.agentbase-state.json
+*.credentials.json
+.last_image
+.vercel
+*.pem
+
+# Data, SQLite databases, and workspace directories
+/data/
+/data/*
+!/data/.gitkeep
+/bootstrap/
+/scratch/
+/tmp/
+.agents/
+/logs/
+*.sqlite3
+*.sqlite3-*
+
+# Zip archives
+*.zip
+!seed/kb-seed.zip
+
+# Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.bak
+
+# Misc
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+
+# Python cache
+__pycache__/
+*.py[cod]
